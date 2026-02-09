@@ -1799,6 +1799,26 @@ impl PgIndexerStore {
         )
     }
 
+    fn trigger_table_reindex(&self, table: PrunableTable) -> Result<(), IndexerError> {
+        let table_name_str = table.to_string();
+        let raw_query = format!("REINDEX TABLE CONCURRENTLY {}", table_name_str);
+        let mut conn = self
+            .blocking_cp
+            .get()
+            .map_err(|e| IndexerError::PostgresWrite(e.to_string()))?;
+
+        diesel::sql_query(raw_query)
+            .execute(&mut conn)
+            .tap_ok(|_| {
+                tracing::info!("Triggered reindex of {table_name_str}");
+            })
+            .tap_err(|e| {
+                tracing::error!("failed to trigger reindex of {table_name_str}: {e}");
+            })
+            .map(|_| ())
+            .map_err(Into::into)
+    }
+
     async fn execute_in_blocking_worker<F, R>(&self, f: F) -> Result<R, IndexerError>
     where
         F: FnOnce(Self) -> Result<R, IndexerError> + Send + 'static,
@@ -1848,6 +1868,11 @@ impl PgIndexerStore {
 
 #[async_trait]
 impl IndexerStore for PgIndexerStore {
+    async fn trigger_table_reindex(&self, table_name: PrunableTable) -> Result<(), IndexerError> {
+        self.execute_in_blocking_worker(move |this| this.trigger_table_reindex(table_name))
+            .await
+    }
+
     async fn get_latest_checkpoint_sequence_number(&self) -> Result<Option<u64>, IndexerError> {
         self.execute_in_blocking_worker(|this| this.get_latest_checkpoint_sequence_number())
             .await

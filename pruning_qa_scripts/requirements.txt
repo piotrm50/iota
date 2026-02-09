@@ -1,0 +1,10 @@
+# Python dependencies for IOTA Indexer Pruning QA Scripts
+
+# PostgreSQL database adapter
+psycopg2-binary>=2.9.0
+
+# HTTP requests for RPC health checks
+requests>=2.28.0
+
+# Base58 encoding for IOTA digests and addresses
+base58>=2.1.0

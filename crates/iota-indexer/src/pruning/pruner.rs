@@ -25,10 +25,18 @@ const UPDATE_WATERMARKS_LOWER_BOUNDS_TASK_INTERVAL: Duration = Duration::from_se
 /// pruning to complete or timeout, ensuring safe pruning without affecting
 /// active queries.
 #[cfg(any(test, feature = "pg_integration", feature = "shared_test_runtime"))]
-const PRUNING_DELAY_MS: u64 = 1000; // 1 second for tests
+const DEFAULT_PRUNING_DELAY_MS: u64 = 1000; // 1 second for tests
 
 #[cfg(not(any(test, feature = "pg_integration", feature = "shared_test_runtime")))]
-const PRUNING_DELAY_MS: u64 = 2 * 60 * 60 * 1000; // 2 hours for production
+const DEFAULT_PRUNING_DELAY_MS: u64 = 2 * 60 * 60 * 1000; // 2 hours for production
+
+/// Get pruning delay from environment variable or use default
+fn get_pruning_delay_ms() -> u64 {
+    std::env::var("PRUNING_DELAY_MS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_PRUNING_DELAY_MS)
+}
 
 /// Maximum number of transactions to prune in a single batch for ByTransaction
 /// strategy
@@ -37,6 +45,8 @@ const MAX_TRANSACTIONS_PER_PRUNE_BATCH: u64 = 1000;
 /// Maximum number of checkpoints to prune in a single batch for ByCheckpoint
 /// strategy
 const MAX_CHECKPOINTS_PER_PRUNE_BATCH: u64 = 1000;
+
+const RUN_REINDEX_EVERY_KEYS: u64 = 1_000_000;
 
 /// Interval for running the pruning task
 const PRUNING_TASK_INTERVAL: Duration = Duration::from_secs(5);
@@ -138,6 +148,23 @@ impl PruningChunk {
             PruningChunk::CheckpointRange(_, end) => end + 1,
             PruningChunk::TransactionRange(_, end) => end + 1,
             PruningChunk::GlobalSeqRange(_, end) => end + 1,
+        }
+    }
+
+    /// Returns true if this chunk contains a value that is an exact multiple of
+    /// `RUN_REINDEX_EVERY_KEYS`. Used to efficiently trigger periodic
+    /// database maintenance (like REINDEX or VACUUM) after pruning a target
+    /// number of items.
+    pub fn should_trigger_reindex(&self) -> bool {
+        return false; // disable for now
+
+        match self {
+            PruningChunk::Epoch(_) => false,
+            PruningChunk::CheckpointRange(start, end)
+            | PruningChunk::TransactionRange(start, end)
+            | PruningChunk::GlobalSeqRange(start, end) => {
+                (*end / RUN_REINDEX_EVERY_KEYS) > (start.saturating_sub(1) / RUN_REINDEX_EVERY_KEYS)
+            }
         }
     }
 }
@@ -280,6 +307,16 @@ impl<'a> TablePruner<'a> {
                 break;
             }
 
+            if pruning_chunk.should_trigger_reindex() {
+                if let Err(err) = self.store.trigger_table_reindex(self.table).await {
+                    error!(
+                        "failed to trigger reindex of table {}: {err}",
+                        self.table.as_ref()
+                    );
+                    break;
+                }
+            }
+
             // Update lowest_unpruned_key to the next chunk to prune
             let next_chunk_start = pruning_chunk.next_chunk_start();
             if let Err(err) = self
@@ -379,7 +416,7 @@ impl<'a> TablePruner<'a> {
         // The watermark timestamp indicates when data was marked for pruning.
         // We delay pruning to allow any reads accessing this data to complete or
         // timeout.
-        let pruning_allowed_timestamp_ms = watermark_timestamp_ms as u64 + PRUNING_DELAY_MS;
+        let pruning_allowed_timestamp_ms = watermark_timestamp_ms as u64 + get_pruning_delay_ms();
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -392,7 +429,7 @@ impl<'a> TablePruner<'a> {
                 wait_duration.as_millis(),
                 self.table.as_ref(),
                 watermark_timestamp_ms,
-                PRUNING_DELAY_MS
+                get_pruning_delay_ms()
             );
 
             self.cancel

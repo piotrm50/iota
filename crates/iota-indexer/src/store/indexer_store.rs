@@ -190,4 +190,6 @@ pub trait IndexerStore: Any + Clone + Sync + Send + 'static {
         &self,
         entity: String,
     ) -> Result<Option<StoredWatermark>, IndexerError>;
+
+    async fn trigger_table_reindex(&self, table_name: PrunableTable) -> Result<(), IndexerError>;
 }
