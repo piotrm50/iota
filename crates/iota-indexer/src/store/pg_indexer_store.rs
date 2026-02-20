@@ -117,7 +117,7 @@ macro_rules! prune_tx_or_event_indice_table {
 // is now less relevant. We should do experiments and remove it if it's true.
 const PG_COMMIT_CHUNK_SIZE_INTRA_DB_TX: usize = 1000;
 // The amount of rows to update in one DB transaction
-const PG_COMMIT_PARALLEL_CHUNK_SIZE: usize = 100;
+const PG_COMMIT_PARALLEL_CHUNK_SIZE: usize = 500;
 // The amount of rows to update in one DB transaction, for objects particularly
 // Having this number too high may cause many db deadlocks because of
 // optimistic locking.
