@@ -125,6 +125,13 @@ pub struct Parameters {
     /// discovered, without affecting protocol-level endpoint availability.
     #[serde(default = "Parameters::default_enable_fast_commit_syncer")]
     pub enable_fast_commit_syncer: bool,
+
+    /// Port for the DAG visualizer gRPC server (localhost only).
+    /// When set, starts a debugging server for real-time DAG visualization.
+    /// Disabled by default (None).
+    #[cfg(feature = "dag-visualizer")]
+    #[serde(default)]
+    pub dag_visualizer_port: Option<u16>,
 }
 
 impl Parameters {
@@ -293,6 +300,8 @@ impl Default for Parameters {
             fast_commit_sync_batch_size: Parameters::default_fast_commit_sync_batch_size(),
             commit_sync_gap_threshold: Parameters::default_commit_sync_gap_threshold(),
             enable_fast_commit_syncer: Parameters::default_enable_fast_commit_syncer(),
+            #[cfg(feature = "dag-visualizer")]
+            dag_visualizer_port: None,
         }
     }
 }

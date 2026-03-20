@@ -35,7 +35,6 @@ RUN cargo build --profile ${PROFILE} \
       --features ${CARGO_BUILD_FEATURES:=default} && \
     cp $TARGET_FOLDER/iota-node ./iota-node
 
-
 # Production image
 FROM debian:trixie-slim AS runtime
 

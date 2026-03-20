@@ -13,6 +13,7 @@ $PYTHON_CMD cargo_sort.py --consolidate-deps \
   --strict-ignore "*:sdk/move-bytecode-template" \
   --strict-ignore "tonic:crates/telemetry-subscribers" \
   --strict-ignore "prost:crates/telemetry-subscribers" \
+  --strict-ignore "prost-build:crates/iota-proxy" \
   --strict-ignore "syn:crates/iota-proc-macros" \
   --strict-ignore "syn:crates/iota-proto-build" \
   --keep-in-workspace fastcrypto-vdf \

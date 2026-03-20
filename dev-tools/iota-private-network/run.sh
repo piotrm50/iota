@@ -1,17 +1,17 @@
 #!/bin/bash
-
 # Copyright (c) 2024 IOTA Stiftung
 # SPDX-License-Identifier: Apache-2.0
-
 
 # Default validator count and consensus
 NUM_VALIDATORS=4
 PROTOCOL="starfish"
-while getopts "n:p:" opt; do
+DAG_VIZ=false
+while getopts "n:p:d" opt; do
   case "$opt" in
     n) NUM_VALIDATORS="$OPTARG" ;;
     p) PROTOCOL="$OPTARG" ;;
-    *) echo "Usage: $0 [-n num_validators]"; exit 1 ;;
+    d) DAG_VIZ=true ;;
+    *) echo "Usage: $0 [-n num_validators] [-p protocol] [-d]"; exit 1 ;;
   esac
 done
 shift $((OPTIND -1))
@@ -47,7 +47,11 @@ ENV_FILE="$PRIVNET_DIR/.env"
 set_env_var CONSENSUS_PROTOCOL "$PROTOCOL" "$ENV_FILE"
 echo "Set CONSENSUS_PROTOCOL=$PROTOCOL in $ENV_FILE"
 
-
+COMPOSE_FILES="-f docker-compose.yaml"
+if $DAG_VIZ; then
+  COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.dag-viz.yaml"
+  echo "DAG visualizer enabled (-d flag)"
+fi
 
 function start_services() {
   services="$1"
@@ -55,7 +59,10 @@ function start_services() {
   for ((i=1; i<=NUM_VALIDATORS; i++)); do
     validators="$validators validator-$i"
   done
-  docker compose up -d $validators $services
+  if $DAG_VIZ; then
+    services="$services dag-visualizer-server dag-visualizer-frontend dag-viz-traefik"
+  fi
+  docker compose $COMPOSE_FILES up -d $validators $services
 }
 
 modes=(

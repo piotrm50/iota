@@ -24,5 +24,5 @@ quote.workspace = true
 regex.workspace = true
 syn = { version = "2.0", features = ["full"] }
 tonic-build.workspace = true
-tonic-prost-build = "0.14"
+tonic-prost-build.workspace = true
 walkdir = "2.5"

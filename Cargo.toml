@@ -164,6 +164,7 @@ members = [
   "crates/simulacrum-server",
   "crates/starfish/config",
   "crates/starfish/core",
+  "crates/starfish/dag-visualizer-proto",
   "crates/starfish/simtests",
   "crates/telemetry-subscribers",
   "crates/test-cluster",
@@ -338,6 +339,7 @@ prometheus = "0.14.0"
 proptest = "1.6.0"
 proptest-derive = "0.5.1"
 prost = "0.14"
+prost-build = "0.14"
 prost-types = "0.14"
 quote = "1.0.23"
 rand = "0.8.5"
@@ -381,6 +383,7 @@ tonic = { version = "0.14", features = ["zstd", "transport"] }
 tonic-build = "0.14"
 tonic-health = "0.14"
 tonic-prost = "0.14"
+tonic-prost-build = "0.14"
 tonic-rustls = "0.3.0"
 tower = { version = "0.4.12", features = ["util", "timeout", "load-shed", "limit"] }
 tower-http = { version = "0.5", features = ["cors", "timeout", "trace", "set-header", "propagate-header"] }
@@ -394,6 +397,7 @@ bin-version = { path = "crates/bin-version" }
 consensus-config = { path = "consensus/config" }
 consensus-core = { path = "consensus/core" }
 consensus-simtests = { path = "consensus/simtests" }
+dag-visualizer-proto = { path = "crates/starfish/dag-visualizer-proto" }
 iota = { path = "crates/iota" }
 iota-adapter-transactional-tests = { path = "crates/iota-adapter-transactional-tests" }
 iota-analytics-indexer = { path = "crates/iota-analytics-indexer" }
