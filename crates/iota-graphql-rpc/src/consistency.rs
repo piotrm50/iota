@@ -9,11 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     filter, query,
     raw_query::RawQuery,
-    types::{
-        available_range::AvailableRange,
-        cursor::{JsonCursor, Page, ScanLimited},
-        object::Cursor,
-    },
+    types::cursor::{JsonCursor, Page, ScanLimited},
 };
 
 /// The checkpoint sequence number for entities not available for view.
@@ -21,13 +17,43 @@ pub(crate) const UNAVAILABLE_CHECKPOINT_SEQUENCE_NUMBER: u64 = u64::MAX;
 
 #[derive(Copy, Clone)]
 pub(crate) enum View {
-    /// Return objects that fulfill the filtering criteria, even if there are
-    /// more recent versions of the object within the checkpoint range. This
-    /// is used for lookups such as by `object_id` and `version`.
+    /// Exact lookup by id+version, no consistency filtering.
     Historical,
-    /// Return objects that fulfill the filtering criteria and are the most
-    /// recent version within the checkpoint range.
-    Consistent,
+    /// Latest state at end of checkpoint.
+    Consistent {
+        checkpoint_viewed_at: u64,
+    },
+    /// Latest state at or before `parent_version`, as of the checkpoint where
+    /// the parent version was superseded.
+    ///
+    /// Used for dynamic field queries where the parent object was resolved at
+    /// a specific version (e.g. `object(version: 5) { dynamicFields { ... } }`).
+    ///
+    /// Multiple transactions within the same checkpoint can modify the same
+    /// object, producing intra-checkpoint versions. The `parent_version` pins
+    /// the view to a specific version within the checkpoint, so that dynamic
+    /// fields reflect the state at that parent version rather than at end of
+    /// checkpoint.
+    ///
+    /// `parent_superseded_at` is the checkpoint where the parent version was
+    /// itself replaced by a newer version. It is obtained from the backward
+    /// history entry used to resolve the parent object. If the parent is still
+    /// at the current version (not yet superseded), this falls back to
+    /// `checkpoint_viewed_at`.
+    ///
+    /// Using `parent_superseded_at` instead of `checkpoint_viewed_at` gives a
+    /// tighter and more correct scan window — it catches DFs that were
+    /// superseded between the parent's creation and `checkpoint_viewed_at`,
+    /// which would otherwise be missed.
+    ///
+    /// The query uses `superseded_at_checkpoint >= parent_superseded_at`
+    /// (non-strict `>=`) to include intra-checkpoint versions, and
+    /// `object_version <= parent_version` to scope the version. MAX(version)
+    /// picks the latest DF version at or before the parent's version.
+    ConsistentAtParentVersion {
+        parent_superseded_at: u64,
+        parent_version: u64,
+    },
 }
 
 /// The consistent cursor for an index into a `Vec` field is constructed from
@@ -75,120 +101,210 @@ impl ScanLimited for JsonCursor<ConsistentIndexCursor> {}
 
 impl ScanLimited for JsonCursor<ConsistentNamedCursor> {}
 
-/// Constructs a `RawQuery` against the `objects_snapshot` and `objects_history`
-/// table to fetch objects that satisfy some filtering criteria `filter_fn`
-/// within the provided checkpoint range `lhs` and `rhs`. The `objects_snapshot`
-/// table contains the latest versions of objects up to a checkpoint sequence
-/// number, and `objects_history` captures changes after that, so a query to
-/// both tables is necessary to handle these object states:
-/// 1) In snapshot, not in history - occurs when an object gets snapshotted and
-///    then has not been modified since
-/// 2) In history, not in snapshot - occurs when a new object is created
-/// 3) In snapshot and in history - occurs when an object is snapshotted and
-///    further modified
+/// Constructs a `RawQuery` using the **backward diff** approach to fetch
+/// objects at a consistent point in time.
 ///
-/// Additionally, even among objects that satisfy the filtering criteria, it is
-/// possible that there is a yet more recent version of the object within the
-/// checkpoint range, such as when the owner of an object changes. The `LEFT
-/// JOIN` against the `objects_history` table handles this and scenario 3. Note
-/// that the implementation applies the `LEFT JOIN` to each inner query in
-/// conjunction with the `page`'s cursor and limit. If this was instead done
-/// once at the end, the query would be drastically inefficient as we would be
-/// dealing with a large number of rows from `objects_snapshot`, and potentially
-/// `objects_history` as the checkpoint range grows. Instead, the `LEFT JOIN`
-/// and limit applied on the inner queries work in conjunction to make the final
-/// query noticeably more efficient. The former serves as a filter, and the
-/// latter reduces the number of rows that the database needs to work with.
+/// # Backward diff approach
 ///
-/// However, not all queries require this `LEFT JOIN`, such as when no filtering
-/// criteria is specified, or if the filter is a lookup at a specific
-/// `object_id` and `object_version`. This is controlled by the `view`
-/// parameter. If the `view` parameter is set to `Consistent`, this filter
-/// is applied, otherwise if the `view` parameter is set to `Historical`, this
-/// filter is not applied.
+/// The `objects` table contains the latest state, which may be ahead of
+/// `checkpoint_viewed_at`. Instead of building forward from a lagging snapshot,
+/// we start from the live `objects` table and apply a backward diff using
+/// `objects_backward_history` to undo changes that happened after
+/// `checkpoint_viewed_at`.
 ///
-/// Finally, the two queries are merged together with `UNION ALL`. We use `UNION
-/// ALL` instead of `UNION`; the latter incurs significant overhead as it
-/// additionally de-duplicates records from both sources. This dedupe is
-/// unnecessary, since we have the fragment `SELECT DISTINCT ON (object_id) ...
-/// ORDER BY object_id, object_version DESC`. This is also redundant for the
-/// most part, due to the invariant that the `objects_history` captures changes
-/// that occur after `objects_snapshot`, but it's a safeguard to handle any
-/// possible overlap during snapshot creation.
+/// The `objects_backward_history` table stores, for each object version change,
+/// the **previous** object state and the checkpoint at which that state was
+/// superseded (`superseded_at_checkpoint`). An entry with
+/// `superseded_at_checkpoint = C` means the row contains the object state that
+/// was valid just before checkpoint C replaced it.
+///
+/// ## Cases handled
+///
+/// 1. **Object not modified after `checkpoint_viewed_at`** — the row in
+///    `objects` is valid. No backward-history entry with
+///    `superseded_at_checkpoint > checkpoint_viewed_at` exists, so we return
+///    the `objects` row as-is.
+///
+/// 2. **Object modified after `checkpoint_viewed_at`** — the `objects` row is
+///    too new. A backward-history entry exists whose
+///    `superseded_at_checkpoint` is the smallest value >
+///    `checkpoint_viewed_at`; that entry contains the state valid at
+///    `checkpoint_viewed_at`. We return the backward-history row instead.
+///
+/// 3. **Object created after `checkpoint_viewed_at`** — the object exists in
+///    `objects` but didn't exist at `checkpoint_viewed_at`. The backward-history
+///    table includes a creation entry for it (with
+///    `superseded_at_checkpoint` = creation checkpoint and no previous object
+///    data), so the LEFT JOIN exclusion on Source A filters it out. Source B
+///    returns the creation entry, but since it has no previous object data, it
+///    produces no result row.
+///
+/// 4. **Object deleted after `checkpoint_viewed_at`** — the object is absent
+///    from `objects`. But a backward-history entry with
+///    `superseded_at_checkpoint > checkpoint_viewed_at` holds the live state at
+///    that point. The backward-history source picks it up.
+///
+/// 5. **Object modified so it no longer matches the filter** — same as case 2:
+///    the backward-history entry may match the filter even though the current
+///    `objects` row doesn't.
+///
+/// 6. **Object modified so it started matching the filter** — the `objects` row
+///    matches but the old version doesn't. The backward-history source returns
+///    the old (non-matching) version, which the filter rejects. Meanwhile the
+///    `objects` source also rejects it because a backward-history entry exists
+///    (the object was modified after `checkpoint_viewed_at`). Correctly
+///    excluded from both sides.
+///
+/// ## View modes
+///
+/// **`View::Historical`** — exact lookup by id+version. No consistency
+/// filtering; the LEFT JOIN and backward-history logic are skipped entirely.
+///
+/// **`View::Consistent`** — end-of-checkpoint state. Source A excludes objects
+/// with any backward-history entry where `superseded_at_checkpoint >
+/// checkpoint_viewed_at` (strict `>`). Source B picks the MIN(object_version)
+/// from entries superseded after `checkpoint_viewed_at` — the pre-modification
+/// state.
+///
+/// **`View::ConsistentAtParentVersion`** — intra-checkpoint version-pinned
+/// state. Used for dynamic field queries. Source A excludes objects with any
+/// backward-history entry where `superseded_at_checkpoint >=
+/// parent_superseded_at` (non-strict `>=`) and `object_version <=
+/// parent_version`. Source B picks the MAX(object_version) from entries where
+/// `superseded_at_checkpoint >= parent_superseded_at` and
+/// `object_version <= parent_version` — the latest version at or before the
+/// parent's version. The `>=` (vs `>` in Consistent) opens the window to
+/// include intra-checkpoint versions that were superseded within the same
+/// checkpoint. Using `parent_superseded_at` (instead of `checkpoint_viewed_at`)
+/// ensures DFs superseded between the parent's checkpoint and
+/// `checkpoint_viewed_at` are not missed.
+///
+/// ## Implementation
+///
+/// **Source A: `objects` table** — objects whose current state is still valid.
+/// We LEFT JOIN against `objects_backward_history` to exclude any object that
+/// has a backward-history entry indicating it was superseded.
+///
+/// **Source B: `objects_backward_history`** — previous versions of objects that
+/// were superseded. The aggregation function (MIN or MAX) and the boundary
+/// condition (`>` or `>=`) depend on the `View` mode.
+///
+/// The two sources are `UNION ALL`'d and deduplicated with
+/// `DISTINCT ON (object_id) ... ORDER BY object_version DESC`.
 pub(crate) fn build_objects_query(
     view: View,
-    range: AvailableRange,
-    page: &Page<Cursor>,
+    page: &Page<super::types::object::Cursor>,
     filter_fn: impl Fn(RawQuery) -> RawQuery,
-    newer_criteria: impl Fn(RawQuery) -> RawQuery,
 ) -> RawQuery {
-    let mut snapshot_objs_inner = query!("SELECT * FROM objects_snapshot");
-    snapshot_objs_inner = filter_fn(snapshot_objs_inner);
+    // --- Source A: live objects from the `objects` table ---
+    let mut live_objs_inner = query!("SELECT * FROM objects");
+    live_objs_inner = filter_fn(live_objs_inner);
 
-    let mut snapshot_objs = match view {
-        View::Consistent => {
-            // Subquery to be used in `LEFT JOIN` for more recent object versions
-            let newer = newer_criteria(filter!(
-                query!("SELECT object_id, object_version FROM objects_history"),
-                format!(
-                    r#"checkpoint_sequence_number BETWEEN {} AND {}"#,
-                    range.first, range.last
-                )
-            ));
-
-            // The `LEFT JOIN` serves as a filter to remove objects that have a more recent
-            // version
-            let mut snapshot_objs = query!(
-                r#"SELECT candidates.* FROM ({}) candidates
-                    LEFT JOIN ({}) newer
-                    ON (candidates.object_id = newer.object_id AND candidates.object_version < newer.object_version)"#,
-                snapshot_objs_inner,
-                newer
+    let mut live_objs = match view {
+        View::Consistent { checkpoint_viewed_at } => {
+            // Subquery to find older object versions from backward history
+            // after checkpoint_viewed_at (strict >). If such an entry exists
+            // with a lower version, the `objects` row has been superseded.
+            let older = filter!(
+                query!("SELECT object_id, object_version FROM objects_backward_history"),
+                format!("superseded_at_checkpoint > {}", checkpoint_viewed_at)
             );
-            snapshot_objs = filter!(snapshot_objs, "newer.object_version IS NULL");
-            snapshot_objs
+
+            let mut live_objs = query!(
+                r#"SELECT candidates.* FROM ({}) candidates
+                    LEFT JOIN ({}) older
+                    ON (candidates.object_id = older.object_id AND candidates.object_version > older.object_version)"#,
+                live_objs_inner,
+                older
+            );
+            live_objs = filter!(live_objs, "older.object_version IS NULL");
+            live_objs
+        }
+        View::ConsistentAtParentVersion { parent_superseded_at, parent_version } => {
+            // Non-strict >= to include intra-checkpoint versions, bounded by
+            // parent_version to scope the comparison. Uses parent_superseded_at
+            // (not checkpoint_viewed_at) to catch DFs superseded between the
+            // parent's checkpoint and the current checkpoint.
+            let older = filter!(
+                query!("SELECT object_id, object_version FROM objects_backward_history"),
+                format!(
+                    "superseded_at_checkpoint >= {} AND object_version <= {}",
+                    parent_superseded_at, parent_version
+                )
+            );
+
+            let mut live_objs = query!(
+                r#"SELECT candidates.* FROM ({}) candidates
+                    LEFT JOIN ({}) older
+                    ON (candidates.object_id = older.object_id AND candidates.object_version > older.object_version)"#,
+                live_objs_inner,
+                older
+            );
+            live_objs = filter!(live_objs, "older.object_version IS NULL");
+            live_objs
         }
         View::Historical => {
-            // The cursor pagination logic refers to the table with the `candidates` alias
-            query!(
-                "SELECT candidates.* FROM ({}) candidates",
-                snapshot_objs_inner
-            )
+            query!("SELECT candidates.* FROM ({}) candidates", live_objs_inner)
         }
     };
 
-    // Always apply cursor pagination and limit to constrain the number of rows
-    // returned, ensure that the inner queries are in step, and to handle the
-    // scenario where a user provides more `objectKeys` than allowed by the
-    // maximum page size.
-    snapshot_objs = page.apply::<StoredHistoryObject>(snapshot_objs);
+    live_objs = page.apply::<StoredHistoryObject>(live_objs);
 
-    // Similar to the snapshot query, construct the filtered inner query for the
-    // history table.
-    let mut history_window = query!("SELECT * FROM objects_history");
+    // --- Source B: previous versions from `objects_backward_history` ---
+    let mut history_window = query!("SELECT * FROM objects_backward_history");
     history_window = filter_fn(history_window);
 
     let mut history_objs = match view {
-        View::Consistent => {
-            // Additionally bound the inner `objects_history` query by the checkpoint range
+        View::Consistent { checkpoint_viewed_at } => {
+            // Only consider entries superseded after checkpoint_viewed_at
+            // (strict >). MIN(object_version) gives the pre-modification state
+            // — the version that was live at the end of checkpoint_viewed_at.
+            history_window = filter!(
+                history_window,
+                format!("superseded_at_checkpoint > {}", checkpoint_viewed_at)
+            );
+
+            let oldest = filter!(
+                query!("SELECT object_id, MIN(object_version) AS min_version FROM objects_backward_history"),
+                format!("superseded_at_checkpoint > {}", checkpoint_viewed_at)
+            )
+            .group_by("object_id");
+
+            query!(
+                r#"WITH history_window AS ({}),
+                    oldest AS ({})
+                    SELECT candidates.* FROM history_window candidates
+                    JOIN oldest
+                    ON candidates.object_id = oldest.object_id
+                    AND candidates.object_version = oldest.min_version"#,
+                history_window,
+                oldest
+            )
+        }
+        View::ConsistentAtParentVersion { parent_superseded_at, parent_version } => {
+            // Non-strict >= using parent_superseded_at to include
+            // intra-checkpoint versions and catch DFs superseded between the
+            // parent's checkpoint and the current checkpoint. Bounded by
+            // parent_version. MAX(object_version) gives the latest version at
+            // or before the parent's version.
             history_window = filter!(
                 history_window,
                 format!(
-                    r#"checkpoint_sequence_number BETWEEN {} AND {}"#,
-                    range.first, range.last
+                    "superseded_at_checkpoint >= {} AND object_version <= {}",
+                    parent_superseded_at, parent_version
                 )
             );
 
-            let newest = newer_criteria(filter!(
-                query!("SELECT object_id, MAX(object_version) AS max_version FROM objects_history"),
+            let newest = filter!(
+                query!("SELECT object_id, MAX(object_version) AS max_version FROM objects_backward_history"),
                 format!(
-                    r#"checkpoint_sequence_number BETWEEN {} AND {}"#,
-                    range.first, range.last
+                    "superseded_at_checkpoint >= {} AND object_version <= {}",
+                    parent_superseded_at, parent_version
                 )
-            ))
+            )
             .group_by("object_id");
 
-            let history_objs = query!(
+            query!(
                 r#"WITH history_window AS ({}),
                     newest AS ({})
                     SELECT candidates.* FROM history_window candidates
@@ -197,27 +313,26 @@ pub(crate) fn build_objects_query(
                     AND candidates.object_version = newest.max_version"#,
                 history_window,
                 newest
-            );
-            history_objs
+            )
         }
         View::Historical => {
-            // The cursor pagination logic refers to the table with the `candidates` alias
             query!("SELECT candidates.* FROM ({}) candidates", history_window)
         }
     };
 
-    // Always apply cursor pagination and limit to constrain the number of rows
-    // returned, ensure that the inner queries are in step, and to handle the
-    // scenario where a user provides more `objectKeys` than allowed by the
-    // maximum page size.
     history_objs = page.apply::<StoredHistoryObject>(history_objs);
 
-    // Combine the two queries, and select the most recent version of each object.
-    // The result set is the most recent version of objects from
-    // `objects_snapshot` and `objects_history` that match the filter criteria.
+    // --- Combine sources ---
+    //
+    // UNION ALL is safe: for Consistent and ConsistentAtParentVersion views,
+    // source A returns objects NOT superseded and source B returns objects that
+    // WERE superseded — these sets are disjoint by construction.
+    //
+    // DISTINCT ON + ORDER BY is a safeguard for the Historical view case
+    // and handles any edge cases.
     let query = query!(
         r#"SELECT DISTINCT ON (object_id) * FROM (({}) UNION ALL ({})) candidates"#,
-        snapshot_objs,
+        live_objs,
         history_objs
     )
     .order_by("object_id")

@@ -36,6 +36,7 @@ use iota_types::{
     base_types::{IotaAddress, ObjectID, ObjectRef},
     crypto::{AccountKeyPair, IotaKeyPair, get_key_pair},
     digests::TransactionDigest,
+    effects::TransactionEffectsAPI,
     gas_coin::NANOS_PER_IOTA,
     object::Owner,
     programmable_transaction_builder::ProgrammableTransactionBuilder,
@@ -52,7 +53,7 @@ use crate::{
     common::{
         ApiTestSetup, force_new_epoch_and_wait, indexer_wait_for_checkpoint,
         indexer_wait_for_object, indexer_wait_for_optimistic_transactions_count,
-        node_wait_for_object, publish_test_move_package,
+        indexer_wait_for_transaction, node_wait_for_object, publish_test_move_package,
         start_test_cluster_with_read_write_indexer,
     },
 };
@@ -1525,6 +1526,679 @@ fn clever_errors() {
         };
         assert_eq!(error, &expected_error);
     });
+}
+
+/// Test that verifies how objects with dynamic fields appear in checkpoint
+/// input_objects and output_objects when fetched from the REST API (the primary
+/// ingestion path used by the indexer).
+///
+/// The parent has TWO dynamic fields ("counter" u64 and "label" String), but
+/// only "counter" is ever read or mutated.  This lets us observe whether the
+/// untouched DF ("label") leaks into input/output objects.
+///
+/// Scenario:
+/// 1. Deploy a Move package with dynamic field support
+/// 2. Create a parent object with two dynamic fields attached
+/// 3. Execute a read-only transaction that reads only the "counter" DF
+/// 4. Execute a mutation transaction that modifies only the "counter" DF
+/// 5. Fetch the full checkpoints via the REST API and inspect input/output
+///    objects for each transaction
+#[test]
+fn test_dynamic_field_checkpoint_objects() -> Result<(), anyhow::Error> {
+    let ApiTestSetup {
+        runtime,
+        cluster,
+        store,
+        client,
+    } = ApiTestSetup::get_or_init();
+
+    runtime.block_on(async move {
+        indexer_wait_for_checkpoint(store, 1).await;
+
+        let (address, keypair): (_, AccountKeyPair) = get_key_pair();
+        let keypair = IotaKeyPair::Ed25519(keypair);
+
+        // Fund the address
+        let (gas_id, gas_seq, _) = cluster
+            .fund_address_and_return_gas(
+                cluster.get_reference_gas_price().await,
+                Some(10 * NANOS_PER_IOTA),
+                address,
+            )
+            .await;
+        indexer_wait_for_object(client, gas_id, gas_seq).await;
+
+        // Step 1: Deploy the dynamic_field_test package
+        let ((package_id, _, _), _publish_response) =
+            publish_test_move_package(client, address, &keypair, "dynamic_field_test")
+                .await
+                .unwrap();
+
+        // Step 2: Create a parent object with two dynamic fields
+        let create_response = execute_move_call(
+            client,
+            address,
+            &keypair,
+            package_id,
+            "dynamic_field_test".to_string(),
+            "create_parent_with_df".to_string(),
+            type_args![].unwrap(),
+            call_args!(address).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            create_response.status_ok(),
+            Some(true),
+            "create_parent_with_df failed: {create_response:?}"
+        );
+
+        let create_digest = *create_response
+            .effects
+            .as_ref()
+            .unwrap()
+            .transaction_digest();
+
+        // Should have 3 created objects: Parent + Field<String,u64> +
+        // Field<String,String>
+        let created_objects: Vec<_> = create_response
+            .effects
+            .as_ref()
+            .unwrap()
+            .created()
+            .iter()
+            .collect();
+        assert!(
+            created_objects.len() >= 3,
+            "Expected at least 3 created objects (Parent + 2 Fields), got {}",
+            created_objects.len()
+        );
+
+        let parent_obj_id = create_response
+            .object_changes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find_map(|change| match change {
+                ObjectChange::Created {
+                    object_id,
+                    object_type,
+                    owner: Owner::AddressOwner(_),
+                    ..
+                } if object_type.name.as_str() == "Parent" => Some(*object_id),
+                _ => None,
+            })
+            .expect("should find created Parent object");
+
+        // Wait for the node to have the parent object
+        let parent_version = create_response
+            .effects
+            .as_ref()
+            .unwrap()
+            .created()
+            .iter()
+            .find(|o| o.object_id() == parent_obj_id)
+            .unwrap()
+            .version();
+        node_wait_for_object(cluster, parent_obj_id, parent_version).await;
+
+        // Step 3: Read-only transaction on the parent (reads only "counter" DF)
+        let read_response = execute_move_call(
+            client,
+            address,
+            &keypair,
+            package_id,
+            "dynamic_field_test".to_string(),
+            "read_parent".to_string(),
+            type_args![].unwrap(),
+            call_args!(parent_obj_id).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            read_response.status_ok(),
+            Some(true),
+            "read_parent failed: {read_response:?}"
+        );
+        let read_digest = *read_response.effects.as_ref().unwrap().transaction_digest();
+
+        // Step 4: Mutate only the "counter" dynamic field
+        let mutate_response = execute_move_call(
+            client,
+            address,
+            &keypair,
+            package_id,
+            "dynamic_field_test".to_string(),
+            "mutate_df".to_string(),
+            type_args![].unwrap(),
+            call_args!(parent_obj_id).unwrap(),
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            mutate_response.status_ok(),
+            Some(true),
+            "mutate_df failed: {mutate_response:?}"
+        );
+        let mutate_digest = *mutate_response
+            .effects
+            .as_ref()
+            .unwrap()
+            .transaction_digest();
+
+        // Wait for all transactions to be indexed, then get checkpoint numbers
+        indexer_wait_for_transaction(create_digest, store, client).await;
+        indexer_wait_for_transaction(read_digest, store, client).await;
+        indexer_wait_for_transaction(mutate_digest, store, client).await;
+
+        let create_checkpoint = client
+            .get_transaction_block(
+                create_digest,
+                Some(IotaTransactionBlockResponseOptions::new()),
+            )
+            .await
+            .unwrap()
+            .checkpoint
+            .unwrap();
+        let read_checkpoint = client
+            .get_transaction_block(
+                read_digest,
+                Some(IotaTransactionBlockResponseOptions::new()),
+            )
+            .await
+            .unwrap()
+            .checkpoint
+            .unwrap();
+        let mutate_checkpoint = client
+            .get_transaction_block(
+                mutate_digest,
+                Some(IotaTransactionBlockResponseOptions::new()),
+            )
+            .await
+            .unwrap()
+            .checkpoint
+            .unwrap();
+
+        // Step 5: Fetch full checkpoints via the REST API and inspect objects
+        let rest_client = iota_rest_api::Client::new(cluster.rpc_url());
+
+        // -- Inspect the CREATE checkpoint --
+        let create_cp_data = rest_client
+            .get_full_checkpoint(create_checkpoint)
+            .await
+            .unwrap();
+        let create_tx = create_cp_data
+            .transactions
+            .iter()
+            .find(|tx| *tx.effects.transaction_digest() == create_digest)
+            .expect("should find create tx in checkpoint");
+
+        let create_input_ids: Vec<_> = create_tx.input_objects.iter().map(|o| o.id()).collect();
+        let create_output_ids: Vec<_> = create_tx.output_objects.iter().map(|o| o.id()).collect();
+
+        // The create tx should have the Parent and both Fields in output_objects
+        assert!(
+            create_output_ids.contains(&parent_obj_id),
+            "output_objects should contain Parent {parent_obj_id}"
+        );
+
+        // Identify the two DF object IDs (both are newly created, not gas)
+        let df_obj_ids: Vec<_> = create_output_ids
+            .iter()
+            .filter(|id| **id != parent_obj_id && !create_input_ids.contains(id))
+            .copied()
+            .collect();
+        assert_eq!(
+            df_obj_ids.len(),
+            2,
+            "Expected exactly 2 dynamic field objects in create output, got {:?}",
+            df_obj_ids
+        );
+
+        println!("=== CREATE parent_with_df (checkpoint {create_checkpoint}) ===");
+        println!(
+            "  input_objects ({}): {:?}",
+            create_input_ids.len(),
+            create_input_ids
+        );
+        println!(
+            "  output_objects ({}): {:?}",
+            create_output_ids.len(),
+            create_output_ids
+        );
+        println!("  Parent object ID: {parent_obj_id}");
+        println!("  DF object IDs: {:?}", df_obj_ids);
+
+        // -- Inspect the READ checkpoint --
+        let read_cp_data = rest_client
+            .get_full_checkpoint(read_checkpoint)
+            .await
+            .unwrap();
+        let read_tx = read_cp_data
+            .transactions
+            .iter()
+            .find(|tx| *tx.effects.transaction_digest() == read_digest)
+            .expect("should find read tx in checkpoint");
+
+        let read_input_ids: Vec<_> = read_tx.input_objects.iter().map(|o| o.id()).collect();
+        let read_output_ids: Vec<_> = read_tx.output_objects.iter().map(|o| o.id()).collect();
+
+        println!("\n=== READ parent (checkpoint {read_checkpoint}) ===");
+        println!(
+            "  input_objects ({}): {:?}",
+            read_input_ids.len(),
+            read_input_ids
+        );
+        println!(
+            "  output_objects ({}): {:?}",
+            read_output_ids.len(),
+            read_output_ids
+        );
+
+        assert!(
+            read_input_ids.contains(&parent_obj_id),
+            "read tx input_objects should contain Parent {parent_obj_id}"
+        );
+
+        println!(
+            "  Parent in input_objects: {}",
+            read_input_ids.contains(&parent_obj_id)
+        );
+        println!(
+            "  Parent in output_objects: {}",
+            read_output_ids.contains(&parent_obj_id)
+        );
+        for df_id in &df_obj_ids {
+            println!(
+                "  DF {df_id} in input_objects: {}",
+                read_input_ids.contains(df_id)
+            );
+            println!(
+                "  DF {df_id} in output_objects: {}",
+                read_output_ids.contains(df_id)
+            );
+        }
+
+        // -- Inspect the MUTATE checkpoint --
+        let mutate_cp_data = rest_client
+            .get_full_checkpoint(mutate_checkpoint)
+            .await
+            .unwrap();
+        let mutate_tx = mutate_cp_data
+            .transactions
+            .iter()
+            .find(|tx| *tx.effects.transaction_digest() == mutate_digest)
+            .expect("should find mutate tx in checkpoint");
+
+        let mutate_input_ids: Vec<_> = mutate_tx.input_objects.iter().map(|o| o.id()).collect();
+        let mutate_output_ids: Vec<_> = mutate_tx.output_objects.iter().map(|o| o.id()).collect();
+
+        println!("\n=== MUTATE dynamic field (checkpoint {mutate_checkpoint}) ===");
+        println!(
+            "  input_objects ({}): {:?}",
+            mutate_input_ids.len(),
+            mutate_input_ids
+        );
+        println!(
+            "  output_objects ({}): {:?}",
+            mutate_output_ids.len(),
+            mutate_output_ids
+        );
+
+        assert!(
+            mutate_input_ids.contains(&parent_obj_id),
+            "mutate tx input_objects should contain Parent {parent_obj_id}"
+        );
+        assert!(
+            mutate_output_ids.contains(&parent_obj_id),
+            "mutate tx output_objects should contain Parent {parent_obj_id}"
+        );
+
+        println!(
+            "  Parent in input_objects: {}",
+            mutate_input_ids.contains(&parent_obj_id)
+        );
+        println!(
+            "  Parent in output_objects: {}",
+            mutate_output_ids.contains(&parent_obj_id)
+        );
+        for df_id in &df_obj_ids {
+            println!(
+                "  DF {df_id} in input_objects: {}",
+                mutate_input_ids.contains(df_id)
+            );
+            println!(
+                "  DF {df_id} in output_objects: {}",
+                mutate_output_ids.contains(df_id)
+            );
+        }
+
+        // Exactly one DF should appear in mutate output_objects (the one that
+        // was actually mutated, "counter"). The other ("label") should not.
+        let mutated_dfs: Vec<_> = df_obj_ids
+            .iter()
+            .filter(|id| mutate_output_ids.contains(id))
+            .collect();
+        assert_eq!(
+            mutated_dfs.len(),
+            1,
+            "Expected exactly 1 DF in mutate output_objects, got {:?}",
+            mutated_dfs
+        );
+        let counter_df_id = *mutated_dfs[0];
+        let label_df_id = *df_obj_ids.iter().find(|id| **id != counter_df_id).unwrap();
+
+        println!("\n  => 'counter' DF (touched): {counter_df_id}");
+        println!("  => 'label' DF (untouched): {label_df_id}");
+
+        // The untouched "label" DF must not appear in either read or mutate txs
+        assert!(
+            !read_input_ids.contains(&label_df_id) && !read_output_ids.contains(&label_df_id),
+            "untouched 'label' DF should not appear in read tx"
+        );
+        assert!(
+            !mutate_input_ids.contains(&label_df_id) && !mutate_output_ids.contains(&label_df_id),
+            "untouched 'label' DF should not appear in mutate tx"
+        );
+
+        // Print version changes for detailed analysis
+        println!("\n=== Version analysis ===");
+        let tracked = [parent_obj_id, counter_df_id, label_df_id];
+        let label = |id: ObjectID| {
+            if id == parent_obj_id {
+                "Parent"
+            } else if id == counter_df_id {
+                "counter_DF"
+            } else {
+                "label_DF"
+            }
+        };
+        for obj in &create_tx.output_objects {
+            if tracked.contains(&obj.id()) {
+                println!(
+                    "  CREATE output: {} ({}) version={}",
+                    obj.id(),
+                    label(obj.id()),
+                    obj.version().value()
+                );
+            }
+        }
+        for obj in &read_tx.input_objects {
+            if tracked.contains(&obj.id()) {
+                println!(
+                    "  READ input:    {} ({}) version={}",
+                    obj.id(),
+                    label(obj.id()),
+                    obj.version().value()
+                );
+            }
+        }
+        for obj in &read_tx.output_objects {
+            if tracked.contains(&obj.id()) {
+                println!(
+                    "  READ output:   {} ({}) version={}",
+                    obj.id(),
+                    label(obj.id()),
+                    obj.version().value()
+                );
+            }
+        }
+        for obj in &mutate_tx.input_objects {
+            if tracked.contains(&obj.id()) {
+                println!(
+                    "  MUTATE input:  {} ({}) version={}",
+                    obj.id(),
+                    label(obj.id()),
+                    obj.version().value()
+                );
+            }
+        }
+        for obj in &mutate_tx.output_objects {
+            if tracked.contains(&obj.id()) {
+                println!(
+                    "  MUTATE output: {} ({}) version={}",
+                    obj.id(),
+                    label(obj.id()),
+                    obj.version().value()
+                );
+            }
+        }
+        Ok(())
+    })
+}
+
+/// Test chained dynamic object fields (Parent -> DOF1 -> DOF2) to observe how
+/// versions evolve in checkpoint input_objects / output_objects.
+///
+/// This tests the scenario described in the `root_version` comment in graphql:
+/// "Parent >= DOF1, DOF2 but DOF1 < DOF2" — which happens when DOF1 is only
+/// read (not mutated) to reach DOF2 for mutation.
+///
+/// Scenario:
+/// 1. Create chain: Parent -> Child (DOF1) -> Grandchild (DOF2)
+/// 2. read_child: read DOF1 only (immutable borrow)
+/// 3. read_grandchild: read DOF1 then DOF2 (both immutable borrows)
+/// 4. mutate_grandchild: mut borrow Parent -> mut borrow DOF1 -> mut borrow DOF2
+/// 5. mutate_child: mut borrow Parent -> mut borrow DOF1 (DOF2 untouched)
+/// 6. mutate_grandchild again: to see DOF1 read-through after step 5
+#[test]
+fn test_chained_dynamic_object_field_checkpoint_objects() -> Result<(), anyhow::Error> {
+    let ApiTestSetup {
+        runtime,
+        cluster,
+        store,
+        client,
+    } = ApiTestSetup::get_or_init();
+
+    runtime.block_on(async move {
+        indexer_wait_for_checkpoint(store, 1).await;
+
+        let (address, keypair): (_, AccountKeyPair) = get_key_pair();
+        let keypair = IotaKeyPair::Ed25519(keypair);
+
+        let (gas_id, gas_seq, _) = cluster
+            .fund_address_and_return_gas(
+                cluster.get_reference_gas_price().await,
+                Some(100 * NANOS_PER_IOTA),
+                address,
+            )
+            .await;
+        indexer_wait_for_object(client, gas_id, gas_seq).await;
+
+        // Deploy package
+        let ((package_id, _, _), _) =
+            publish_test_move_package(client, address, &keypair, "dynamic_field_test")
+                .await
+                .unwrap();
+
+        // --- Step 1: Create the chain: Parent -> Child -> Grandchild ---
+        let create_response = execute_move_call_with_budget(
+            client, address, &keypair, package_id,
+            "dynamic_field_test", "create_chain",
+            call_args!(address).unwrap(),
+            50_000_000,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            create_response.status_ok(),
+            Some(true),
+            "create_chain failed: {:?}",
+            create_response
+        );
+
+        let create_digest = *create_response.effects.as_ref().unwrap().transaction_digest();
+
+        // Find the Parent object (AddressOwner)
+        let parent_obj_id = create_response
+            .object_changes
+            .as_ref()
+            .unwrap()
+            .iter()
+            .find_map(|change| match change {
+                ObjectChange::Created {
+                    object_id,
+                    object_type,
+                    owner: Owner::AddressOwner(_),
+                    ..
+                } if object_type.name.as_str() == "Parent" => Some(*object_id),
+                _ => None,
+            })
+            .expect("should find Parent");
+
+        let parent_version = create_response
+            .effects.as_ref().unwrap()
+            .created().iter()
+            .find(|o| o.object_id() == parent_obj_id)
+            .unwrap()
+            .version();
+        node_wait_for_object(cluster, parent_obj_id, parent_version).await;
+
+        indexer_wait_for_transaction(create_digest, store, client).await;
+        let create_cp = client
+            .get_transaction_block(create_digest, Some(IotaTransactionBlockResponseOptions::new()))
+            .await.unwrap().checkpoint.unwrap();
+
+        let rest_client = iota_rest_api::Client::new(cluster.rpc_url());
+
+        // Identify all created object IDs from the full checkpoint
+        let create_cp_data = rest_client.get_full_checkpoint(create_cp).await.unwrap();
+        let create_tx = create_cp_data.transactions.iter()
+            .find(|tx| *tx.effects.transaction_digest() == create_digest)
+            .unwrap();
+
+        let create_output_ids: Vec<_> = create_tx.output_objects.iter().map(|o| o.id()).collect();
+        let create_input_ids: Vec<_> = create_tx.input_objects.iter().map(|o| o.id()).collect();
+
+        // Created objects (excluding gas and package-related)
+        let new_obj_ids: Vec<_> = create_output_ids.iter()
+            .filter(|id| !create_input_ids.contains(id) && **id != parent_obj_id)
+            .copied()
+            .collect();
+
+        println!("=== CREATE chain (checkpoint {create_cp}) ===");
+        println!("  Parent: {parent_obj_id}");
+        println!("  Other new objects (Child, Grandchild, DOF wrappers): {:?}", new_obj_ids);
+        for obj in &create_tx.output_objects {
+            println!("    output: {} version={}", obj.id(), obj.version().value());
+        }
+
+        // Collect all created object IDs for tracking across steps
+        let all_ids: Vec<_> = create_tx.output_objects.iter()
+            .filter(|o| !create_input_ids.contains(&o.id()))
+            .map(|o| o.id())
+            .collect();
+
+        // Macro to run a move call, wait for indexing, fetch checkpoint, print
+        macro_rules! run_step {
+            ($func:expr) => {{
+                let args = vec![iota_json::IotaJsonValue::from_object_id(parent_obj_id)];
+                let resp = execute_move_call_with_budget(
+                    client, address, &keypair, package_id,
+                    "dynamic_field_test", $func, args, 50_000_000,
+                ).await.unwrap();
+                assert_eq!(resp.status_ok(), Some(true), concat!($func, " failed: {:?}"), resp);
+                let digest = *resp.effects.as_ref().unwrap().transaction_digest();
+                indexer_wait_for_transaction(digest, store, client).await;
+                let cp = client.get_transaction_block(
+                    digest, Some(IotaTransactionBlockResponseOptions::new())
+                ).await.unwrap().checkpoint.unwrap();
+                let cp_data = rest_client.get_full_checkpoint(cp).await.unwrap();
+                let tx = cp_data.transactions.iter()
+                    .find(|tx| *tx.effects.transaction_digest() == digest).unwrap();
+                let input_ids: Vec<_> = tx.input_objects.iter().map(|o| o.id()).collect();
+                let output_ids: Vec<_> = tx.output_objects.iter().map(|o| o.id()).collect();
+                println!(concat!("\n=== ", $func, " (cp {}) ==="), cp);
+                println!("  input_objects ({}): {:?}", input_ids.len(), input_ids);
+                println!("  output_objects ({}): {:?}", output_ids.len(), output_ids);
+                for id in &all_ids {
+                    let in_input = tx.input_objects.iter().find(|o| o.id() == *id);
+                    let in_output = tx.output_objects.iter().find(|o| o.id() == *id);
+                    let label = if *id == parent_obj_id { "Parent" } else { "obj" };
+                    match (in_input, in_output) {
+                        (Some(i), Some(o)) => println!(
+                            "  {} {}: input v{} -> output v{}",
+                            label, id, i.version().value(), o.version().value()
+                        ),
+                        (Some(i), None) => println!(
+                            "  {} {}: input v{} -> (not in output)",
+                            label, id, i.version().value()
+                        ),
+                        (None, Some(o)) => println!(
+                            "  {} {}: (not in input) -> output v{}",
+                            label, id, o.version().value()
+                        ),
+                        (None, None) => {}
+                    }
+                }
+            }};
+        }
+
+        // Step 2: read_child — immutable borrow of DOF1
+        run_step!("read_child");
+
+        // Step 3: read_grandchild — immutable borrow through chain
+        run_step!("read_grandchild");
+
+        // Step 4: mutate_grandchild — mut borrow Parent -> DOF1 -> DOF2
+        run_step!("mutate_grandchild");
+
+        // Step 5: mutate_child — mut borrow Parent -> DOF1, DOF2 untouched
+        run_step!("mutate_child");
+
+        // Step 6: mutate_grandchild again — after step 5 bumped DOF1 but not DOF2
+        run_step!("mutate_grandchild");
+
+        Ok(())
+    })
+}
+
+async fn execute_move_call_with_budget(
+    client: &HttpClient,
+    address: IotaAddress,
+    account_keypair: &IotaKeyPair,
+    package_object_id: ObjectID,
+    module: &str,
+    function: &str,
+    arguments: Vec<iota_json::IotaJsonValue>,
+    budget: u64,
+) -> Result<IotaTransactionBlockResponse, anyhow::Error> {
+    let transaction_bytes: TransactionBlockBytes = client
+        .move_call(
+            address,
+            package_object_id,
+            module.to_string(),
+            function.to_string(),
+            type_args![].unwrap(),
+            arguments,
+            None,
+            budget.into(),
+            None,
+        )
+        .await
+        .unwrap();
+
+    let signed_transaction =
+        to_sender_signed_transaction(transaction_bytes.to_data().unwrap(), account_keypair);
+    let (tx_bytes, signatures) = signed_transaction.to_tx_bytes_and_signatures();
+
+    Ok(client
+        .execute_transaction_block(
+            tx_bytes,
+            signatures,
+            Some(
+                IotaTransactionBlockResponseOptions::new()
+                    .with_effects()
+                    .with_events()
+                    .with_object_changes(),
+            ),
+            Some(ExecuteTransactionRequestType::WaitForLocalExecution),
+        )
+        .await
+        .unwrap())
 }
 
 async fn get_counter_value(counter_obj_id: ObjectID, client: &HttpClient) -> u64 {

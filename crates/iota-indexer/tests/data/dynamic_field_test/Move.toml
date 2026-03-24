@@ -1,0 +1,9 @@
+[package]
+name = "dynamic_field_test"
+edition = "legacy"
+
+[dependencies]
+Iota = { local = "../../../../iota-framework/packages/iota-framework" }
+
+[addresses]
+dynamic_field_test = "0x0"
