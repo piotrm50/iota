@@ -71,7 +71,7 @@ impl EffectsCertifier {
     pub(crate) async fn get_certified_finalized_effects<A>(
         &self,
         authority_aggregator: &Arc<AuthorityAggregator<A>>,
-        client_monitor: &Arc<ValidatorClientMonitor<A>>,
+        client_monitor: &Arc<ValidatorClientMonitor>,
         tx_digest: Option<TransactionDigest>,
         // This keeps track of the current target for getting full effects.
         mut current_target: AuthorityName,
@@ -108,7 +108,7 @@ impl EffectsCertifier {
             }
         };
 
-        let mut retrier = RequestRetrier::new(authority_aggregator, client_monitor, vec![], vec![]);
+        let mut retrier = RequestRetrier::new(authority_aggregator, client_monitor, &[], &[]);
         let ping_type = tx_digest.is_none();
 
         // Channel for wait_for_acknowledgments to notify which validators have acked.
@@ -368,7 +368,7 @@ impl EffectsCertifier {
     async fn wait_for_acknowledgments<A>(
         &self,
         authority_aggregator: &Arc<AuthorityAggregator<A>>,
-        client_monitor: &Arc<ValidatorClientMonitor<A>>,
+        client_monitor: &Arc<ValidatorClientMonitor>,
         tx_digest: Option<TransactionDigest>,
         options: &SubmitTransactionOptions,
         _submitted_tx_to_validator: AuthorityName,
@@ -663,7 +663,7 @@ impl EffectsCertifier {
         name: AuthorityName,
         display_name: String,
         client: &Arc<SafeClient<A>>,
-        client_monitor: &Arc<ValidatorClientMonitor<A>>,
+        client_monitor: &Arc<ValidatorClientMonitor>,
         request: GetTxStatusRequest,
         options: &SubmitTransactionOptions,
     ) -> IotaResult<Vec<(TransactionDigest, TxStatusUpdate)>>
