@@ -1919,6 +1919,7 @@ impl IndexerStore for PgIndexerStore {
     async fn persist_object_history(
         &self,
         object_changes: Vec<TransactionObjectChangesToCommit>,
+        n_threads: usize,
     ) -> Result<(), IndexerError> {
         let skip_history = std::env::var("SKIP_OBJECT_HISTORY")
             .map(|val| val.eq_ignore_ascii_case("true"))
@@ -1938,9 +1939,8 @@ impl IndexerStore for PgIndexerStore {
             .start_timer();
 
         let len = objects.len();
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
         let chunk_size =
-            (len / parallel_writes).clamp(self.config.parallel_objects_chunk_size, 10_000);
+            (len / n_threads).clamp(self.config.parallel_objects_chunk_size, 10_000);
         let chunks = chunk!(objects, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
         // blocking threads
@@ -1950,7 +1950,7 @@ impl IndexerStore for PgIndexerStore {
                 self.spawn_blocking_task(move |this| this.persist_objects_history_chunk(c))
                     .await
             })
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -1972,6 +1972,7 @@ impl IndexerStore for PgIndexerStore {
     async fn persist_object_versions(
         &self,
         object_versions: Vec<StoredObjectVersion>,
+        n_threads: usize,
     ) -> Result<(), IndexerError> {
         if object_versions.is_empty() {
             return Ok(());
@@ -1983,8 +1984,7 @@ impl IndexerStore for PgIndexerStore {
             .start_timer();
 
         let object_versions_count = object_versions.len();
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
-        let chunk_size = (object_versions_count / parallel_writes)
+        let chunk_size = (object_versions_count / n_threads)
             .clamp(self.config.parallel_objects_chunk_size, 10_000);
         let chunks = chunk!(object_versions, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
@@ -1995,7 +1995,7 @@ impl IndexerStore for PgIndexerStore {
                 self.spawn_blocking_task(move |this| this.persist_object_version_chunk(c))
                     .await
             })
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -2025,14 +2025,14 @@ impl IndexerStore for PgIndexerStore {
     async fn persist_transactions(
         &self,
         transactions: Vec<IndexedTransaction>,
+        n_threads: usize,
     ) -> Result<(), IndexerError> {
         let guard = self
             .metrics
             .checkpoint_db_commit_latency_transactions
             .start_timer();
         let len = transactions.len();
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
-        let chunk_size = (len / parallel_writes).clamp(self.config.parallel_chunk_size, 10_000);
+        let chunk_size = (len / n_threads).clamp(self.config.parallel_chunk_size, 10_000);
         let chunks = chunk!(transactions, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
         // blocking threads
@@ -2042,7 +2042,7 @@ impl IndexerStore for PgIndexerStore {
                 self.spawn_blocking_task(move |this| this.persist_transactions_chunk(c))
                     .await
             })
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -2070,7 +2070,11 @@ impl IndexerStore for PgIndexerStore {
         Ok(())
     }
 
-    async fn persist_events(&self, events: Vec<IndexedEvent>) -> Result<(), IndexerError> {
+    async fn persist_events(
+        &self,
+        events: Vec<IndexedEvent>,
+        n_threads: usize,
+    ) -> Result<(), IndexerError> {
         if events.is_empty() {
             return Ok(());
         }
@@ -2079,8 +2083,7 @@ impl IndexerStore for PgIndexerStore {
             .metrics
             .checkpoint_db_commit_latency_events
             .start_timer();
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
-        let chunk_size = (len / parallel_writes).clamp(self.config.parallel_chunk_size, 10_000);
+        let chunk_size = (len / n_threads).clamp(self.config.parallel_chunk_size, 10_000);
         let chunks = chunk!(events, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
         // blocking threads
@@ -2090,7 +2093,7 @@ impl IndexerStore for PgIndexerStore {
                 self.spawn_blocking_task(move |this| this.persist_events_chunk(c))
                     .await
             })
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -2152,7 +2155,11 @@ impl IndexerStore for PgIndexerStore {
             .await
     }
 
-    async fn persist_event_indices(&self, indices: Vec<EventIndex>) -> Result<(), IndexerError> {
+    async fn persist_event_indices(
+        &self,
+        indices: Vec<EventIndex>,
+        n_threads: usize,
+    ) -> Result<(), IndexerError> {
         if indices.is_empty() {
             return Ok(());
         }
@@ -2161,14 +2168,13 @@ impl IndexerStore for PgIndexerStore {
             .metrics
             .checkpoint_db_commit_latency_event_indices
             .start_timer();
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
-        let chunk_size = (len / parallel_writes).clamp(self.config.parallel_chunk_size, 10_000);
+        let chunk_size = (len / n_threads).clamp(self.config.parallel_chunk_size, 10_000);
         let chunks = chunk!(indices, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
         // blocking threads
         futures::stream::iter(chunks)
             .map(|c| self.persist_event_indices_chunk(c))
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -2291,7 +2297,11 @@ impl IndexerStore for PgIndexerStore {
         Ok(())
     }
 
-    async fn persist_tx_indices(&self, indices: Vec<TxIndex>) -> Result<(), IndexerError> {
+    async fn persist_tx_indices(
+        &self,
+        indices: Vec<TxIndex>,
+        n_threads: usize,
+    ) -> Result<(), IndexerError> {
         if indices.is_empty() {
             return Ok(());
         }
@@ -2300,14 +2310,13 @@ impl IndexerStore for PgIndexerStore {
             .metrics
             .checkpoint_db_commit_latency_tx_indices
             .start_timer();
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
-        let chunk_size = (len / parallel_writes).clamp(self.config.parallel_chunk_size, 10_000);
+        let chunk_size = (len / n_threads).clamp(self.config.parallel_chunk_size, 10_000);
         let chunks = chunk!(indices, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
         // blocking threads
         futures::stream::iter(chunks)
             .map(|c| self.persist_tx_indices_chunk_v2(c))
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -2323,6 +2332,7 @@ impl IndexerStore for PgIndexerStore {
     async fn persist_checkpoint_objects(
         &self,
         objects: Vec<CheckpointObjectChanges>,
+        n_threads: usize,
     ) -> Result<(), IndexerError> {
         if objects.is_empty() {
             return Ok(());
@@ -2337,9 +2347,8 @@ impl IndexerStore for PgIndexerStore {
         } = retain_latest_objects_from_checkpoint_batch(objects);
         let mutation_len = mutations.len();
         let deletion_len = deletions.len();
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
         let chunk_size =
-            (mutation_len / parallel_writes).clamp(self.config.parallel_objects_chunk_size, 10_000);
+            (mutation_len / n_threads).clamp(self.config.parallel_objects_chunk_size, 10_000);
         let mutation_chunks = chunk!(mutations, chunk_size);
         let deletion_chunks = chunk!(deletions, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
@@ -2350,7 +2359,7 @@ impl IndexerStore for PgIndexerStore {
                 self.spawn_blocking_task(move |this| this.persist_changed_objects(c))
                     .await
             })
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -2368,7 +2377,7 @@ impl IndexerStore for PgIndexerStore {
                 self.spawn_blocking_task(move |this| this.persist_removed_objects(c))
                     .await
             })
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {
@@ -2389,6 +2398,7 @@ impl IndexerStore for PgIndexerStore {
     async fn persist_tx_global_order(
         &self,
         tx_order: Vec<TxGlobalOrder>,
+        n_threads: usize,
     ) -> Result<(), IndexerError> {
         let guard = self
             .metrics
@@ -2396,8 +2406,7 @@ impl IndexerStore for PgIndexerStore {
             .start_timer();
         let len = tx_order.len();
 
-        let parallel_writes = (self.blocking_cp.max_size() * 2) as usize;
-        let chunk_size = (len / parallel_writes).clamp(self.config.parallel_chunk_size, 10_000);
+        let chunk_size = (len / n_threads).clamp(self.config.parallel_chunk_size, 10_000);
         let chunks = chunk!(tx_order, chunk_size);
         // Throttle the parallel write to avoid exceeding the max-number of tokio
         // blocking threads
@@ -2407,7 +2416,7 @@ impl IndexerStore for PgIndexerStore {
                 self.spawn_blocking_task(move |this| this.persist_tx_global_order_chunk(c))
                     .await
             })
-            .buffer_unordered(parallel_writes)
+            .buffer_unordered(n_threads)
             .try_collect::<Vec<_>>()
             .await
             .map_err(|e| {

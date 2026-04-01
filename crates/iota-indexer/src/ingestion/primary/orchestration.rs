@@ -148,18 +148,18 @@ async fn start_writer_task(
             unprocessed.insert(checkpoint.checkpoint.sequence_number, checkpoint);
         }
         while let Some(checkpoint) = unprocessed.remove(&next_checkpoint_sequence_number) {
-            let epoch = checkpoint.epoch.clone();
+            let is_epoch_boundary = checkpoint.epoch.is_some();
             batch.push(checkpoint);
             next_checkpoint_sequence_number += 1;
             // The batch will consist of contiguous checkpoints and at most one epoch
             // boundary at the end.
-            if batch.len() == writer.checkpoint_commit_batch_size || epoch.is_some() {
-                writer.commit_checkpoints(batch, epoch).await;
+            if batch.len() == writer.checkpoint_commit_batch_size || is_epoch_boundary {
+                writer.commit_checkpoints(batch).await;
                 batch = vec![];
             }
         }
         if !batch.is_empty() {
-            writer.commit_checkpoints(batch, None).await;
+            writer.commit_checkpoints(batch).await;
             batch = vec![];
         }
     }

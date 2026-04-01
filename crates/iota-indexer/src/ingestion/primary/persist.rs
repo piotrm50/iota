@@ -9,7 +9,10 @@ use tracing::{error, info, instrument};
 
 use crate::{
     ingestion::common::{
-        persist::{CHECKPOINT_COMMIT_BATCH_SIZE, CommitterTables, CommitterWatermark},
+        persist::{
+            CHECKPOINT_COMMIT_BATCH_SIZE, CommitterTables, CommitterWatermark, ThreadBudget,
+            WriteTarget,
+        },
         prepare::CheckpointObjectChanges,
     },
     metrics::IndexerMetrics,
@@ -17,6 +20,7 @@ use crate::{
         display::StoredDisplay,
         epoch::{EndOfEpochUpdate, StartOfEpochUpdate},
         obj_indices::StoredObjectVersion,
+        transactions::TxGlobalOrder,
     },
     store::{IndexerStore, PgIndexerStore},
     types::{
@@ -49,6 +53,83 @@ pub struct TransactionObjectChangesToCommit {
 pub struct EpochToCommit {
     pub(crate) last_epoch: Option<EndOfEpochUpdate>,
     pub(crate) new_epoch: StartOfEpochUpdate,
+}
+
+/// Indexed data for a batch of checkpoints.
+struct IndexedCheckpointBatch {
+    checkpoints: Vec<IndexedCheckpoint>,
+    epoch: Option<EpochToCommit>,
+    derived: DerivedData,
+}
+
+impl From<Vec<CheckpointDataToCommit>> for IndexedCheckpointBatch {
+    fn from(batch: Vec<CheckpointDataToCommit>) -> Self {
+        let len = batch.len();
+        let mut checkpoints = Vec::with_capacity(len);
+        let mut transactions = Vec::with_capacity(len);
+        let mut events = Vec::with_capacity(len);
+        let mut tx_indices = Vec::with_capacity(len);
+        let mut event_indices = Vec::with_capacity(len);
+        let mut display_updates = BTreeMap::new();
+        let mut object_changes = Vec::with_capacity(len);
+        let mut object_history_changes = Vec::with_capacity(len);
+        let mut object_versions = Vec::with_capacity(len);
+        let mut packages = Vec::with_capacity(len);
+        let mut epoch = None;
+
+        for cp in batch {
+            checkpoints.push(cp.checkpoint);
+            transactions.extend(cp.transactions);
+            events.extend(cp.events);
+            tx_indices.extend(cp.tx_indices);
+            event_indices.extend(cp.event_indices);
+            display_updates.extend(cp.display_updates);
+            object_changes.push(cp.object_changes);
+            object_history_changes.push(cp.object_history_changes);
+            object_versions.extend(cp.object_versions);
+            packages.extend(cp.packages);
+            if cp.epoch.is_some() {
+                epoch = cp.epoch;
+            }
+        }
+
+        let tx_global_order = transactions.iter().map(Into::into).collect();
+
+        Self {
+            checkpoints,
+            epoch: epoch.clone(),
+            derived: DerivedData {
+                transactions,
+                tx_indices,
+                tx_global_order,
+                events,
+                event_indices,
+                display_updates,
+                packages,
+                object_changes,
+                object_history_changes,
+                object_versions,
+                epoch,
+            },
+        }
+    }
+}
+
+/// Derived data from a batch of checkpoints.
+///
+/// Contains augmented data on transactions, events, objects.
+struct DerivedData {
+    transactions: Vec<IndexedTransaction>,
+    tx_indices: Vec<TxIndex>,
+    tx_global_order: Vec<TxGlobalOrder>,
+    events: Vec<IndexedEvent>,
+    event_indices: Vec<EventIndex>,
+    display_updates: BTreeMap<String, StoredDisplay>,
+    packages: Vec<IndexedPackage>,
+    object_changes: Vec<CheckpointObjectChanges>,
+    object_history_changes: Vec<TransactionObjectChangesToCommit>,
+    object_versions: Vec<StoredObjectVersion>,
+    epoch: Option<EpochToCommit>,
 }
 
 pub(crate) struct PrimaryWriter {
@@ -95,110 +176,23 @@ impl PrimaryWriter {
     pub(crate) async fn commit_checkpoints(
         &self,
         indexed_checkpoint_batch: Vec<CheckpointDataToCommit>,
-        epoch: Option<EpochToCommit>,
     ) {
-        let batch_len = indexed_checkpoint_batch.len();
-        let mut checkpoint_batch = Vec::with_capacity(batch_len);
-        let mut tx_batch = Vec::with_capacity(batch_len);
-        let mut events_batch = Vec::with_capacity(batch_len);
-        let mut tx_indices_batch = Vec::with_capacity(batch_len);
-        let mut event_indices_batch = Vec::with_capacity(batch_len);
-        let mut display_updates_batch = BTreeMap::new();
-        let mut object_changes_batch = Vec::with_capacity(batch_len);
-        let mut object_history_changes_batch = Vec::with_capacity(batch_len);
-        let mut object_versions_batch = Vec::with_capacity(batch_len);
-        let mut packages_batch = Vec::with_capacity(batch_len);
+        let IndexedCheckpointBatch {
+            checkpoints: checkpoint_batch,
+            epoch,
+            derived,
+        } = IndexedCheckpointBatch::from(indexed_checkpoint_batch);
 
-        for indexed_checkpoint in indexed_checkpoint_batch {
-            let CheckpointDataToCommit {
-                checkpoint,
-                transactions,
-                events,
-                event_indices,
-                tx_indices,
-                display_updates,
-                object_changes,
-                object_history_changes,
-                object_versions,
-                packages,
-                ..
-            } = indexed_checkpoint;
-            checkpoint_batch.push(checkpoint);
-            tx_batch.push(transactions);
-            events_batch.push(events);
-            tx_indices_batch.push(tx_indices);
-            event_indices_batch.push(event_indices);
-            display_updates_batch.extend(display_updates.into_iter());
-            object_changes_batch.push(object_changes);
-            object_history_changes_batch.push(object_history_changes);
-            object_versions_batch.push(object_versions);
-            packages_batch.push(packages);
-        }
-
-        let first_checkpoint_seq = checkpoint_batch.first().as_ref().unwrap().sequence_number;
+        let first_checkpoint_seq = checkpoint_batch.first().unwrap().sequence_number;
         let committer_watermark = CommitterWatermark::from(checkpoint_batch.last().unwrap());
+        let checkpoint_num = checkpoint_batch.len();
+        let tx_count = derived.transactions.len();
 
         let guard = self.metrics.checkpoint_db_commit_latency.start_timer();
-        let tx_batch = tx_batch.into_iter().flatten().collect::<Vec<_>>();
 
-        let tx_global_order_batch: Vec<_> = tx_batch.iter().map(Into::into).collect();
-        let tx_indices_batch = tx_indices_batch.into_iter().flatten().collect::<Vec<_>>();
-        let events_batch = events_batch.into_iter().flatten().collect::<Vec<_>>();
-        let event_indices_batch = event_indices_batch
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let object_versions_batch = object_versions_batch
-            .into_iter()
-            .flatten()
-            .collect::<Vec<_>>();
-        let packages_batch = packages_batch.into_iter().flatten().collect::<Vec<_>>();
-        let checkpoint_num = checkpoint_batch.len();
-        let tx_count = tx_batch.len();
-
-        {
-            let _step_1_guard = self
-                .metrics
-                .checkpoint_db_commit_latency_step_1
-                .start_timer();
-            let mut persist_tasks = vec![
-                self.state.persist_transactions(tx_batch),
-                self.state.persist_tx_indices(tx_indices_batch),
-                self.state.persist_events(events_batch),
-                self.state.persist_event_indices(event_indices_batch),
-                self.state.persist_displays(display_updates_batch),
-                self.state.persist_packages(packages_batch),
-                self.state
-                    .persist_object_history(object_history_changes_batch.clone()),
-                self.state
-                    .persist_object_versions(object_versions_batch.clone()),
-                Box::pin(async {
-                    // We need to persist global order before writing objects, so that optimistic
-                    // indexing is blocked from overwriting objects table with old tx data
-                    // reference: https://github.com/iotaledger/iota/issues/10250
-                    self.state
-                        .persist_tx_global_order(tx_global_order_batch.clone())
-                        .await?;
-                    self.state
-                        .persist_checkpoint_objects(object_changes_batch)
-                        .await
-                }),
-            ];
-            if let Some(epoch_data) = epoch.clone() {
-                persist_tasks.push(self.state.persist_epoch(epoch_data));
-            }
-            futures::future::join_all(persist_tasks)
-                .await
-                .into_iter()
-                .map(|res| {
-                    if res.is_err() {
-                        error!("failed to persist data with error: {:?}", res);
-                    }
-                    res
-                })
-                .collect::<IndexerResult<Vec<_>>>()
-                .expect("persisting data into DB should not fail.");
-        }
+        self.persist_derived_data(derived)
+            .await
+            .expect("persisting data into DB should not fail.");
 
         let is_epoch_end = epoch.is_some();
 
@@ -286,5 +280,64 @@ impl PrimaryWriter {
         self.metrics
             .thousand_transaction_avg_db_commit_latency
             .observe(elapsed * 1000.0 / tx_count as f64);
+    }
+
+    async fn persist_derived_data(&self, batch: DerivedData) -> IndexerResult<()> {
+        let _guard = self
+            .metrics
+            .checkpoint_db_commit_latency_step_1
+            .start_timer();
+        let thread_distribution = ThreadBudget::new(self.state.blocking_cp().max_size() as usize)
+            .with_tasks(1, WriteTarget::Transactions) // `transactions`
+            .with_tasks(10, WriteTarget::Transactions) // `tx_indices`
+            .with_tasks(1, WriteTarget::Events) // `events`
+            .with_tasks(7, WriteTarget::Events) // `event_indices`
+            .with_tasks(3, WriteTarget::Objects) // `objects{,_history,_versions}`
+            .build();
+        let tx_threads = thread_distribution.threads_per_task(WriteTarget::Transactions);
+        let ev_threads = thread_distribution.threads_per_task(WriteTarget::Events);
+        let obj_threads = thread_distribution.threads_per_task(WriteTarget::Objects);
+
+        let mut tasks = vec![
+            self.state
+                .persist_transactions(batch.transactions, tx_threads),
+            self.state
+                .persist_tx_indices(batch.tx_indices, 10 * tx_threads),
+            self.state.persist_events(batch.events, ev_threads),
+            self.state
+                .persist_event_indices(batch.event_indices, 7 * ev_threads),
+            self.state.persist_displays(batch.display_updates),
+            self.state.persist_packages(batch.packages),
+            self.state
+                .persist_object_history(batch.object_history_changes, obj_threads),
+            self.state
+                .persist_object_versions(batch.object_versions, obj_threads),
+            Box::pin(async {
+                // We need to persist global order before writing objects, so that optimistic
+                // indexing is blocked from overwriting objects table with old tx data
+                // reference: https://github.com/iotaledger/iota/issues/10250
+                self.state
+                    .persist_tx_global_order(batch.tx_global_order, obj_threads)
+                    .await?;
+                self.state
+                    .persist_checkpoint_objects(batch.object_changes, obj_threads)
+                    .await
+            }),
+        ];
+        if let Some(epoch_data) = batch.epoch {
+            tasks.push(self.state.persist_epoch(epoch_data));
+        }
+
+        futures::future::join_all(tasks)
+            .await
+            .into_iter()
+            .map(|res| {
+                if res.is_err() {
+                    error!("failed to persist data with error: {:?}", res);
+                }
+                res
+            })
+            .collect::<IndexerResult<Vec<_>>>()?;
+        Ok(())
     }
 }

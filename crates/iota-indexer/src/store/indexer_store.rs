@@ -52,11 +52,13 @@ pub trait IndexerStore: Any + Clone + Sync + Send + 'static {
     async fn persist_object_history(
         &self,
         object_changes: Vec<TransactionObjectChangesToCommit>,
+        n_threads: usize,
     ) -> Result<(), IndexerError>;
 
     async fn persist_object_versions(
         &self,
         object_versions: Vec<StoredObjectVersion>,
+        n_threads: usize,
     ) -> Result<(), IndexerError>;
 
     async fn persist_objects_snapshot(
@@ -72,6 +74,7 @@ pub trait IndexerStore: Any + Clone + Sync + Send + 'static {
     async fn persist_transactions(
         &self,
         transactions: Vec<IndexedTransaction>,
+        n_threads: usize,
     ) -> Result<(), IndexerError>;
 
     fn persist_optimistic_transaction_in_existing_transaction(
@@ -80,11 +83,16 @@ pub trait IndexerStore: Any + Clone + Sync + Send + 'static {
         transaction: OptimisticTransaction,
     ) -> Result<(), IndexerError>;
 
-    async fn persist_events(&self, events: Vec<IndexedEvent>) -> Result<(), IndexerError>;
+    async fn persist_events(
+        &self,
+        events: Vec<IndexedEvent>,
+        n_threads: usize,
+    ) -> Result<(), IndexerError>;
 
     async fn persist_event_indices(
         &self,
         event_indices: Vec<EventIndex>,
+        n_threads: usize,
     ) -> Result<(), IndexerError>;
 
     async fn persist_displays(
@@ -141,14 +149,20 @@ pub trait IndexerStore: Any + Clone + Sync + Send + 'static {
     async fn persist_checkpoint_objects(
         &self,
         objects: Vec<CheckpointObjectChanges>,
+        n_threads: usize,
     ) -> Result<(), IndexerError>;
 
     async fn persist_tx_global_order(
         &self,
         tx_order: Vec<TxGlobalOrder>,
+        n_threads: usize,
     ) -> Result<(), IndexerError>;
 
-    async fn persist_tx_indices(&self, indices: Vec<TxIndex>) -> Result<(), IndexerError>;
+    async fn persist_tx_indices(
+        &self,
+        indices: Vec<TxIndex>,
+        n_threads: usize,
+    ) -> Result<(), IndexerError>;
 
     async fn prune_table_by_checkpoint_range(
         &self,

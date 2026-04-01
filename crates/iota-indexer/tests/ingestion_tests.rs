@@ -74,7 +74,7 @@ mod ingestion_tests {
             .map(|_| CheckpointObjectChanges::random())
             .collect();
         pg_store
-            .persist_checkpoint_objects(checkpoint_objects)
+            .persist_checkpoint_objects(checkpoint_objects, 1)
             .await?;
         Ok(())
     }
@@ -413,7 +413,7 @@ mod ingestion_tests {
         // trigger the large vectors to be split into chunks of
         // PG_COMMIT_CHUNK_SIZE_INTRA_DB_TX.
         let tx_indices = std::iter::repeat_with(TxIndex::random).take(1000).collect();
-        pg_store.persist_tx_indices(tx_indices).await?;
+        pg_store.persist_tx_indices(tx_indices, 1).await?;
         Ok(())
     }
 
@@ -451,7 +451,7 @@ mod ingestion_tests {
         let event_indices = std::iter::repeat_with(EventIndex::random)
             .take(2000)
             .collect();
-        pg_store.persist_event_indices(event_indices).await?;
+        pg_store.persist_event_indices(event_indices, 1).await?;
         Ok(())
     }
 
