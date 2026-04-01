@@ -4,7 +4,7 @@
 //! Types and associated logic to use while persisting
 //! data to the database.
 
-use std::{collections::BTreeMap, time::Duration};
+use std::{collections::BTreeMap, num::NonZeroUsize, time::Duration};
 
 use async_trait::async_trait;
 use futures::{FutureExt, StreamExt};
@@ -22,6 +22,84 @@ use crate::{
 
 pub(crate) const CHECKPOINT_COMMIT_BATCH_SIZE: usize = 100;
 pub(crate) const UNPROCESSED_CHECKPOINT_SIZE_LIMIT: usize = 1000;
+
+/// The target of a write task.
+#[derive(Debug, Copy, Clone)]
+pub(crate) enum WriteTarget {
+    /// Represents all transaction-related tables.
+    Transactions,
+    /// Represents all events-related tables.
+    Events,
+    /// Represents all events-related tables.
+    Objects,
+}
+
+impl WriteTarget {
+    /// The relative weight of the write target on the thread distribution.
+    fn weight(self) -> usize {
+        match self {
+            Self::Transactions => 1,
+            Self::Events => 1,
+            Self::Objects => 3,
+        }
+    }
+}
+
+/// Builder that collects task registrations and produces a
+/// [`ThreadDistribution`].
+#[derive(Debug, Clone)]
+pub(crate) struct ThreadBudget {
+    budget: usize,
+    total_weight: usize,
+}
+
+impl ThreadBudget {
+    pub(crate) fn new(budget: usize) -> Self {
+        Self {
+            budget,
+            total_weight: 0,
+        }
+    }
+
+    /// Register a number of tasks with a given [`WriteTarget`].
+    pub(crate) fn with_tasks(mut self, count: usize, category: WriteTarget) -> Self {
+        self.total_weight += count * category.weight();
+        self
+    }
+
+    /// Build the [`ThreadDistribution`]
+    ///
+    /// ## Panic
+    ///
+    /// Panics if no task is registered.
+    pub(crate) fn build(self) -> ThreadDistribution {
+        let total_weight =
+            NonZeroUsize::new(self.total_weight).expect("at least one task must be registered");
+        ThreadDistribution {
+            budget: self.budget,
+            total_weight,
+        }
+    }
+}
+
+/// Distributes a thread budget across write tasks according to their
+/// [`WriteTarget`] weight.
+///
+/// Each call to [`threads_per_task`](Self::threads_per_task) returns the
+/// per-task thread count for the given target.
+#[derive(Debug, Copy, Clone)]
+pub(crate) struct ThreadDistribution {
+    budget: usize,
+    total_weight: NonZeroUsize,
+}
+
+impl ThreadDistribution {
+    /// Derive the number of threads the distribution provides for a task of the
+    /// given `target`.
+    pub(crate) fn threads_per_task(&self, target: WriteTarget) -> usize {
+        self.budget * target.weight() / self.total_weight
+    }
+}
 
 /// Defines the logic of writing operations to the database.
 ///
