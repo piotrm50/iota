@@ -137,18 +137,17 @@ pub async fn start_test_indexer_impl(
     data_ingestion_path: Option<PathBuf>,
     cancel: CancellationToken,
 ) -> (PgIndexerStore, JoinHandle<Result<(), IndexerError>>) {
-    let registry = prometheus::Registry::default();
-    init_metrics(&registry);
-    let indexer_metrics = IndexerMetrics::new(&registry);
-
-    let mut test_db = TestDatabase::new(db_url.clone());
-    let store = create_pg_store(&mut test_db, indexer_metrics.clone(), reset_db);
+    let store = create_pg_store(&db_url, reset_db);
     if reset_db {
         crate::db::reset_database(&mut store.blocking_cp().get().unwrap()).unwrap();
     }
     if let Some(db_init_hook) = db_init_hook {
         db_init_hook(&store);
     }
+
+    let registry = prometheus::Registry::default();
+    init_metrics(&registry);
+    let indexer_metrics = IndexerMetrics::new(&registry);
 
     let handle = match reader_writer_config {
         IndexerTypeConfig::Reader {
@@ -180,8 +179,7 @@ pub async fn start_test_indexer_impl(
             tokio::spawn(async move {
                 Indexer::start_writer_with_config(
                     &ingestion_config,
-                    db_url,
-                    test_db.pool_config,
+                    store_clone,
                     indexer_metrics,
                     snapshot_config,
                     retention_config,
@@ -207,7 +205,7 @@ pub struct TestDatabase {
     pub url: String,
     db_name: String,
     connection: PoolConnection,
-    pub pool_config: ConnectionPoolConfig,
+    pool_config: ConnectionPoolConfig,
 }
 
 impl TestDatabase {
@@ -261,16 +259,17 @@ impl TestDatabase {
     }
 }
 
-pub fn create_pg_store(
-    test_db: &mut TestDatabase,
-    metrics: IndexerMetrics,
-    reset_database: bool,
-) -> PgIndexerStore {
+pub fn create_pg_store(db_url: &str, reset_database: bool) -> PgIndexerStore {
+    let registry = prometheus::Registry::default();
+    init_metrics(&registry);
+    let indexer_metrics = IndexerMetrics::new(&registry);
+
+    let mut test_db = TestDatabase::new(db_url.to_string());
     if reset_database {
         test_db.recreate();
     }
 
-    PgIndexerStore::new(test_db.to_connection_pool(), metrics)
+    PgIndexerStore::new(test_db.to_connection_pool(), indexer_metrics)
 }
 
 fn replace_db_name(db_url: &str, new_db_name: &str) -> (String, String) {
