@@ -663,11 +663,11 @@ pub fn convert_move_call_args(
         .map(|arg| match arg {
             BenchMoveCallArg::Pure(bytes) => pt_builder.pure(bytes.clone()).unwrap(),
             BenchMoveCallArg::Shared((id, initial_shared_version, mutable)) => pt_builder
-                .input(CallArg::Shared(SharedObjectRef {
-                    object_id: *id,
-                    initial_shared_version: *initial_shared_version,
-                    mutable: *mutable,
-                }))
+                .input(CallArg::Shared(SharedObjectRef::new(
+                    *id,
+                    *initial_shared_version,
+                    *mutable,
+                )))
                 .unwrap(),
             BenchMoveCallArg::ImmOrOwnedObject(obj_ref) => pt_builder
                 .input(CallArg::ImmutableOrOwned(*obj_ref))
@@ -680,11 +680,11 @@ pub fn convert_move_call_args(
                     obj_refs
                         .iter()
                         .map(|(id, initial_shared_version, mutable)| {
-                            CallArg::Shared(SharedObjectRef {
-                                object_id: *id,
-                                initial_shared_version: *initial_shared_version,
-                                mutable: *mutable,
-                            })
+                            CallArg::Shared(SharedObjectRef::new(
+                                *id,
+                                *initial_shared_version,
+                                *mutable,
+                            ))
                         }),
                 )
                 .unwrap(),

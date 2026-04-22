@@ -167,11 +167,11 @@ impl SurfStrategy {
         n -= owned;
         if n < shared {
             let (id, initial_shared_version) = state.choose_nth_shared_object(&type_tag, n).await;
-            return Some(CallArg::Shared(SharedObjectRef {
-                object_id: id,
+            return Some(CallArg::Shared(SharedObjectRef::new(
+                id,
                 initial_shared_version,
-                mutable: matches!(kind, InputObjectPassKind::MutRef),
-            }));
+                matches!(kind, InputObjectPassKind::MutRef),
+            )));
         }
         n -= shared;
         let obj_ref = state.choose_nth_immutable_object(&type_tag, n).await;

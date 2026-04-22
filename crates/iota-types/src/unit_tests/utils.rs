@@ -185,11 +185,11 @@ mod move_authenticator {
         //
         // TODO: if it is necessary, AA accounts need to be supported properly in the
         // `AuthorityState` used for testing.
-        let self_call_arg = CallArg::Shared(SharedObjectRef {
-            object_id: address.into(),
-            initial_shared_version: OBJECT_START_VERSION,
-            mutable: false,
-        });
+        let self_call_arg = CallArg::Shared(SharedObjectRef::new(
+            address.into(),
+            OBJECT_START_VERSION,
+            false,
+        ));
         let authenticator = GenericSignature::MoveAuthenticator(MoveAuthenticator::new_v1(
             vec![],
             vec![],

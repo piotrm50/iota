@@ -302,11 +302,11 @@ impl AdversarialTestPayload {
             AdversarialPayloadType::DynamicFieldReads => AdversarialPayloadArgs {
                 fn_name: "read_n_dynamic_fields".to_owned(),
                 args: [
-                    CallArg::Shared(SharedObjectRef {
-                        object_id: self.df_parent_obj_ref.object_id,
-                        initial_shared_version: self.df_parent_obj_ref.version,
-                        mutable: true,
-                    })
+                    CallArg::Shared(SharedObjectRef::new(
+                        self.df_parent_obj_ref.object_id,
+                        self.df_parent_obj_ref.version,
+                        true,
+                    ))
                     .into(),
                     self.get_pct_of(protocol_config.object_runtime_max_num_store_entries())
                         .into(),

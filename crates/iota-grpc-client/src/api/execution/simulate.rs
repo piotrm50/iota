@@ -159,6 +159,7 @@ impl Client {
     ///
     /// ```no_run
     /// # use iota_grpc_client::Client;
+    /// # use iota_sdk_types::TransactionEffects;
     /// # use iota_sdk_types::Transaction;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = Client::connect("http://localhost:9000").await?;
@@ -171,7 +172,10 @@ impl Client {
     /// // Lazy conversion - only deserialize what you need
     /// let executed_tx = result.body().executed_transaction()?;
     /// let effects = executed_tx.effects()?.effects()?;
-    /// println!("Simulation status: {:?}", effects.status());
+    /// match effects {
+    ///     TransactionEffects::V1(effects) => println!("Simulation status: {:?}", effects.status),
+    ///     _ => unimplemented!(),
+    /// };
     ///
     /// let output_objs = executed_tx.output_objects()?;
     /// println!("Would create {} objects", output_objs.objects.len());

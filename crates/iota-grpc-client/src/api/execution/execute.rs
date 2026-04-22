@@ -95,6 +95,7 @@ impl Client {
     /// ```no_run
     /// # use iota_grpc_client::Client;
     /// # use iota_sdk_types::SignedTransaction;
+    /// # use iota_sdk_types::TransactionEffects;
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = Client::connect("http://localhost:9000").await?;
     ///
@@ -105,7 +106,10 @@ impl Client {
     ///
     /// // Lazy conversion - only deserialize what you need
     /// let effects = result.body().effects()?.effects()?;
-    /// println!("Status: {:?}", effects.status());
+    /// match effects {
+    ///     TransactionEffects::V1(effects) => println!("Status: {:?}", effects.status),
+    ///     _ => unimplemented!(),
+    /// };
     ///
     /// let events = result.body().events()?.events()?;
     /// if !events.0.is_empty() {

@@ -77,11 +77,11 @@ impl SlowTestPayload {
         let mut builder = ProgrammableTransactionBuilder::new();
         let args = vec![
             builder
-                .obj(CallArg::Shared(SharedObjectRef {
-                    object_id: IOTA_CLOCK_OBJECT_ID,
-                    initial_shared_version: IOTA_CLOCK_OBJECT_SHARED_VERSION,
-                    mutable: false,
-                }))
+                .obj(CallArg::Shared(SharedObjectRef::new(
+                    IOTA_CLOCK_OBJECT_ID,
+                    IOTA_CLOCK_OBJECT_SHARED_VERSION,
+                    false,
+                )))
                 .unwrap(),
         ];
         builder.programmable_move_call(
@@ -94,11 +94,11 @@ impl SlowTestPayload {
 
         // Add unused mutable shared object input to activate congestion control.
         builder
-            .obj(CallArg::Shared(SharedObjectRef {
-                object_id: self.shared_object_ref.object_id,
-                initial_shared_version: self.shared_object_ref.version,
-                mutable: true,
-            }))
+            .obj(CallArg::Shared(SharedObjectRef::new(
+                self.shared_object_ref.object_id,
+                self.shared_object_ref.version,
+                true,
+            )))
             .unwrap();
 
         TestTransactionBuilder::new(self.sender, account.gas, gas_price)

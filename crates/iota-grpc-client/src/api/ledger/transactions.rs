@@ -96,7 +96,7 @@ impl Client {
     ///
     /// ```no_run
     /// # use iota_grpc_client::Client;
-    /// # use iota_sdk_types::Digest;
+    /// # use iota_sdk_types::{Digest, TransactionEffects};
     /// # async fn example() -> Result<(), Box<dyn std::error::Error>> {
     /// let client = Client::connect("http://localhost:9000").await?;
     /// let digest: Digest = todo!();
@@ -107,7 +107,10 @@ impl Client {
     /// for tx in txs.body() {
     ///     // Lazy conversion - only deserialize what you need
     ///     let effects = tx.effects()?.effects()?;
-    ///     println!("Status: {:?}", effects.status());
+    ///     match effects {
+    ///         TransactionEffects::V1(effects) => println!("Status: {:?}", effects.status),
+    ///         _ => unimplemented!(),
+    ///     };
     ///
     ///     // Access checkpoint number
     ///     let checkpoint = tx.checkpoint_sequence_number()?;

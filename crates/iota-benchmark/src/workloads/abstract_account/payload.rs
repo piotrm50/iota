@@ -150,11 +150,11 @@ impl Payload for AbstractAccountPayload {
         );
 
         // Build MoveAuthenticator args and signature
-        let self_call_arg = CallArg::Shared(SharedObjectRef {
-            object_id: self.aa_object_id,
-            initial_shared_version: self.aa_initial_shared_version,
-            mutable: false,
-        });
+        let self_call_arg = CallArg::Shared(SharedObjectRef::new(
+            self.aa_object_id,
+            self.aa_initial_shared_version,
+            false,
+        ));
 
         let auth_args = build_move_auth_args(
             self.authenticator,
@@ -250,11 +250,11 @@ impl AbstractAccountPayload {
 
             let shared = self.shared_object.unwrap();
             let shared_obj_arg = b
-                .obj(CallArg::Shared(SharedObjectRef {
-                    object_id: shared.object_id,
-                    initial_shared_version: shared.version,
-                    mutable: true,
-                }))
+                .obj(CallArg::Shared(SharedObjectRef::new(
+                    shared.object_id,
+                    shared.version,
+                    true,
+                )))
                 .unwrap();
             // Move call: iota_system::request_add_stake(state, pay_coin,
             // validator_to_stake_address)

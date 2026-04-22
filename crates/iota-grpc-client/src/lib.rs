@@ -4,8 +4,7 @@
 //! gRPC client for IOTA node operations.
 //!
 //! This crate provides a high-level client for interacting with IOTA nodes
-//! via gRPC. It wraps the low-level proto types and provides ergonomic APIs
-//! using SDK types from `iota_sdk_types`.
+//! via gRPC. It wraps the low-level proto types and provides ergonomic APIs.
 //!
 //! # Example
 //!
