@@ -422,7 +422,6 @@ impl EffectsCertifier {
                 {
                     Ok(result) => (name, result),
                     Err(_) => {
-                        // TODO: shouldn't Ok response be also recorded?
                         let feedback =
                             OperationFeedback::builder(name, display_name, OperationType::Effects)
                                 .err_now();
