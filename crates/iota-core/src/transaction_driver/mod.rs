@@ -20,10 +20,7 @@ use effects_certifier::*;
 pub use error::TransactionDriverError;
 use iota_common::backoff::ExponentialBackoff;
 use iota_metrics::{monitored_future, spawn_logged_monitored_task};
-use iota_types::{
-    committee::EpochId, messages_grpc::TxStatusUpdate,
-    quorum_driver_types::ExecuteTransactionRequestType, transaction::Transaction,
-};
+use iota_types::{committee::EpochId, messages_grpc::TxStatusUpdate, transaction::Transaction};
 pub use metrics::*;
 use parking_lot::Mutex;
 use rand::Rng;
@@ -150,7 +147,7 @@ where
         transaction: Option<Transaction>,
         options: SubmitTransactionOptions,
         timeout_duration: Option<Duration>,
-        request_type: Option<ExecuteTransactionRequestType>,
+        skip_certification: bool,
     ) -> Result<QuorumTransactionResponse, TransactionDriverError> {
         const MAX_DRIVE_TRANSACTION_RETRY_DELAY: Duration = Duration::from_secs(10);
 
@@ -187,7 +184,7 @@ where
                         amplification_factor,
                         transaction.clone(),
                         &options,
-                        request_type.clone(),
+                        skip_certification,
                     )
                     .await
                 {
@@ -287,7 +284,7 @@ where
         amplification_factor: u64,
         transaction: Option<Transaction>,
         options: &SubmitTransactionOptions,
-        request_type: Option<ExecuteTransactionRequestType>,
+        skip_certification: bool,
     ) -> Result<QuorumTransactionResponse, TransactionDriverError> {
         let auth_agg = self.authority_aggregator.load();
         let amplification_factor =
@@ -330,30 +327,27 @@ where
         // effects certification broadcast is redundant — finality comes from the
         // certified checkpoint. In that case fetch effects from the submitting
         // validator only. Otherwise run the full certification flow.
-        let result = match request_type {
-            Some(ExecuteTransactionRequestType::WaitForLocalExecution) => {
-                self.certifier
-                    .get_effects_without_certification(
-                        &auth_agg,
-                        tx_digest,
-                        name,
-                        submit_txn_result,
-                        options,
-                    )
-                    .await
-            }
-            _ => {
-                self.certifier
-                    .get_certified_finalized_effects(
-                        &auth_agg,
-                        &self.client_monitor,
-                        tx_digest,
-                        name,
-                        submit_txn_result,
-                        options,
-                    )
-                    .await
-            }
+        let result = if skip_certification {
+            self.certifier
+                .get_effects_without_certification(
+                    &auth_agg,
+                    tx_digest,
+                    name,
+                    submit_txn_result,
+                    options,
+                )
+                .await
+        } else {
+            self.certifier
+                .get_certified_finalized_effects(
+                    &auth_agg,
+                    &self.client_monitor,
+                    tx_digest,
+                    name,
+                    submit_txn_result,
+                    options,
+                )
+                .await
         };
 
         if result.is_ok() {
@@ -427,7 +421,7 @@ where
                             ..Default::default()
                         },
                         Some(ping_timeout),
-                        None,
+                        false,
                     )
                     .await
                 {
