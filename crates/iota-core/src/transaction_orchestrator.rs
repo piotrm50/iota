@@ -284,41 +284,40 @@ where
         // submitting validator. We'll rebuild the response from the local
         // cache further down, sharing the same `wait_for_checkpoint_inclusion`
         // that the skip-cert success path uses.
-        let mut response: Option<ExecuteTransactionResponseV1> = if let Some(td) =
-            &self.transaction_driver
-        {
-            match self
-                .submit_with_transaction_driver(
-                    td.clone(),
-                    request,
-                    client_addr,
-                    request_type.clone(),
-                )
-                .await
-            {
-                Ok(response) => Some(response),
-                Err(TransactionDriverError::SubmittedButFetchFailed { error })
-                    if matches!(
-                        request_type,
-                        ExecuteTransactionRequestType::WaitForLocalExecution
-                    ) =>
+        let mut response: Option<ExecuteTransactionResponseV1> =
+            if let Some(td) = &self.transaction_driver {
+                match self
+                    .submit_with_transaction_driver(
+                        td.clone(),
+                        request,
+                        client_addr,
+                        request_type.clone(),
+                    )
+                    .await
                 {
-                    self.metrics.skip_effect_cert_submitter_fetch_failure.inc();
-                    debug!(
-                        tx_digest = ?transaction.digest(),
-                        "submit_with_transaction_driver fetch failed ({error}); \
-                         will rebuild response from local cache after checkpoint inclusion"
-                    );
-                    None
+                    Ok(response) => Some(response),
+                    Err(TransactionDriverError::SubmittedButFetchFailed { error })
+                        if matches!(
+                            request_type,
+                            ExecuteTransactionRequestType::WaitForLocalExecution
+                        ) =>
+                    {
+                        self.metrics.skip_effect_cert_submitter_fetch_failure.inc();
+                        debug!(
+                            tx_digest = ?transaction.digest(),
+                            "submit_with_transaction_driver fetch failed ({error}); \
+                             will rebuild response from local cache after checkpoint inclusion"
+                        );
+                        None
+                    }
+                    Err(e) => return Err(map_td_error_to_qd(e)),
                 }
-                Err(e) => return Err(map_td_error_to_qd(e)),
-            }
-        } else {
-            let (_, qd_resp) = self
-                .execute_transaction_impl(&epoch_store, request, client_addr)
-                .await?;
-            Some(quorum_driver_response_to_v1(qd_resp))
-        };
+            } else {
+                let (_, qd_resp) = self
+                    .execute_transaction_impl(&epoch_store, request, client_addr)
+                    .await?;
+                Some(quorum_driver_response_to_v1(qd_resp))
+            };
 
         let executed_locally = if matches!(
             request_type,
@@ -1390,5 +1389,52 @@ where
         self.validator_state
             .wait_for_checkpoint_inclusion(digests, timeout)
             .await
+    }
+
+    fn read_transaction_from_cache(
+        &self,
+        digest: &TransactionDigest,
+        include_events: bool,
+        include_input_objects: bool,
+        include_output_objects: bool,
+    ) -> Result<Option<iota_types::transaction_executor::CachedTransactionData>, IotaError> {
+        let cache = self.validator_state.get_transaction_cache_reader();
+        let Some(effects) = cache.try_get_executed_effects(digest)? else {
+            return Ok(None);
+        };
+
+        let events = if include_events {
+            cache.try_get_events(digest)?
+        } else {
+            None
+        };
+
+        let input_objects = if include_input_objects {
+            Some(
+                self.validator_state
+                    .get_transaction_input_objects(&effects)
+                    .map_err(|e| IotaError::Unknown(format!("input objects: {e:?}")))?,
+            )
+        } else {
+            None
+        };
+        let output_objects = if include_output_objects {
+            Some(
+                self.validator_state
+                    .get_transaction_output_objects(&effects)
+                    .map_err(|e| IotaError::Unknown(format!("output objects: {e:?}")))?,
+            )
+        } else {
+            None
+        };
+
+        Ok(Some(
+            iota_types::transaction_executor::CachedTransactionData {
+                effects,
+                events,
+                input_objects,
+                output_objects,
+            },
+        ))
     }
 }
