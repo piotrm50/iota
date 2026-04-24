@@ -233,8 +233,8 @@ fn check_overload_signals(
     (overload_status, load_shedding_percentage)
 }
 
-// Return true if we should reject the txn with `tx_digest`.
-fn should_reject_tx(
+/// Return true if we should reject the txn with `tx_digest`.
+pub(crate) fn should_reject_tx(
     load_shedding_percentage: u32,
     tx_digest: TransactionDigest,
     temporal_seed: u64,
