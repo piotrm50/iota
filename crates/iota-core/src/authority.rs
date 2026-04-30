@@ -288,6 +288,7 @@ pub struct AuthorityMetrics {
 
     pub(crate) authority_overload_status: IntGauge,
     pub(crate) authority_load_shedding_percentage: IntGauge,
+    pub(crate) cache_backpressure_load_shedding_percentage: IntGauge,
 
     pub(crate) transaction_overload_sources: IntCounterVec,
 
@@ -543,6 +544,11 @@ impl AuthorityMetrics {
             authority_load_shedding_percentage: register_int_gauge_with_registry!(
                 "authority_load_shedding_percentage",
                 "The percentage of transactions is shed when the authority is in load shedding mode.",
+                registry)
+                .unwrap(),
+            cache_backpressure_load_shedding_percentage: register_int_gauge_with_registry!(
+                "cache_backpressure_load_shedding_percentage",
+                "Percentage of transactions shed due to writeback-cache backpressure.",
                 registry)
                 .unwrap(),
             transaction_manager_object_cache_misses: register_int_counter_with_registry!(
