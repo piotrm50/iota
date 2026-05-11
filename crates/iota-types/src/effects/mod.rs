@@ -66,7 +66,13 @@ pub enum ObjectRemoveKind {
     Wrap,
 }
 
-pub trait TransactionEffectsAPI {
+mod transaction_effects_api {
+    pub trait Sealed {}
+    impl Sealed for super::TransactionEffects {}
+    impl Sealed for super::TransactionEffectsV1 {}
+}
+
+pub trait TransactionEffectsAPI: transaction_effects_api::Sealed {
     /// Return the status of the transaction.
     fn status(&self) -> &ExecutionStatus;
     fn into_status(self) -> ExecutionStatus;
@@ -136,7 +142,13 @@ pub trait TransactionEffectsAPIForTesting: TransactionEffectsAPI {
     fn unsafe_add_object_tombstone_for_testing(&mut self, object_ref: ObjectRef);
 }
 
-pub trait TransactionEffectsAPIExt {
+mod transaction_effects_api_ext {
+    pub trait Sealed {}
+    impl Sealed for super::TransactionEffects {}
+    impl Sealed for super::TransactionEffectsV1 {}
+}
+
+pub trait TransactionEffectsAPIExt: transaction_effects_api_ext::Sealed {
     fn execution_digests(&self) -> ExecutionDigests;
     /// Return an iterator that iterates through all changed objects, including
     /// mutated, created and unwrapped objects. In other words, all objects
