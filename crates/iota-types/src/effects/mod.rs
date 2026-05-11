@@ -21,8 +21,8 @@ use crate::{
     base_types::{ExecutionDigests, ObjectID, ObjectRef, SequenceNumber},
     committee::Committee,
     crypto::{
-        AuthoritySignInfo, AuthoritySignInfoTrait as _, AuthorityStrongQuorumSignInfo,
-        EmptySignInfo, default_hash,
+        AuthoritySignInfo, AuthoritySignInfoTrait, AuthorityStrongQuorumSignInfo, EmptySignInfo,
+        default_hash,
     },
     digests::{TransactionDigest, TransactionEffectsDigest, TransactionEventsDigest},
     error::IotaResult,
@@ -128,7 +128,8 @@ pub trait TransactionEffectsAPI: transaction_effects_api::Sealed {
     /// Objects that existed as top-level objects before this transaction and
     /// have been wrapped inside another object by it (i.e. no longer visible
     /// in the object store as top-level). References use the post-execution
-    /// version and the [`TransactionEffectsDigest::OBJECT_WRAPPED`] tombstone digest.
+    /// version and the [`TransactionEffectsDigest::OBJECT_WRAPPED`] tombstone
+    /// digest.
     fn wrapped(&self) -> Vec<ObjectRef>;
     /// Returns a flattened view of every object change recorded in these
     /// effects: for each touched object, the input and output version/digest

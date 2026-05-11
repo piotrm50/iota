@@ -35,7 +35,7 @@ use iota_types::{
     crypto::AggregateAuthoritySignature,
     display::DisplayVersionUpdatedEvent,
     effects::{
-        TransactionEffects, TransactionEffectsAPI, TransactionEffectsAPIExt as _, TransactionEvents,
+        TransactionEffects, TransactionEffectsAPI, TransactionEffectsAPIExt, TransactionEvents,
     },
     error::{IotaError, IotaObjectResponseError},
     iota_serde::BigInt,
