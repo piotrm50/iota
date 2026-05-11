@@ -10,8 +10,8 @@ pub use iota_sdk_types::effects::{
     UnchangedSharedKind,
 };
 use iota_sdk_types::{
-    Digest, EpochId, ExecutionStatus, GasCostSummary, IntentScope, Owner, UnchangedSharedObject,
-    Version, crypto::Intent,
+    EpochId, ExecutionStatus, GasCostSummary, IntentScope, Owner, UnchangedSharedObject, Version,
+    crypto::Intent,
 };
 use serde::{Deserialize, Serialize};
 pub use test_effects_builder::TestEffectsBuilder;
@@ -75,11 +75,10 @@ mod transaction_effects_api {
 /// Read-only API for inspecting [`TransactionEffects`] uniformly across
 /// versions.
 ///
-/// This trait is [sealed](transaction_effects_api::Sealed): it is only
-/// implemented for [`TransactionEffects`] and the concrete version structs
-/// (currently [`TransactionEffectsV1`]). The implementation on
-/// [`TransactionEffects`] dispatches to the active version variant, so callers
-/// can write version-agnostic code.
+/// This trait is sealed: it is only implemented for [`TransactionEffects`] and
+/// the concrete version structs (currently [`TransactionEffectsV1`]). The
+/// implementation on [`TransactionEffects`] dispatches to the active version
+/// variant, so callers can write version-agnostic code.
 pub trait TransactionEffectsAPI: transaction_effects_api::Sealed {
     /// Return the status of the transaction.
     fn status(&self) -> &ExecutionStatus;
@@ -119,17 +118,17 @@ pub trait TransactionEffectsAPI: transaction_effects_api::Sealed {
     fn unwrapped(&self) -> Vec<(ObjectRef, Owner)>;
     /// Objects that existed before this transaction and were deleted by it.
     /// References use the post-execution version and the
-    /// [`Digest::OBJECT_DELETED`] tombstone digest.
+    /// [`TransactionEffectsDigest::OBJECT_DELETED`] tombstone digest.
     fn deleted(&self) -> Vec<ObjectRef>;
     /// Objects that were unwrapped and then deleted within this same
     /// transaction (i.e. did not exist as top-level objects either before
     /// or after). References use the post-execution version and the
-    /// [`Digest::OBJECT_DELETED`] tombstone digest.
+    /// [`TransactionEffectsDigest::OBJECT_DELETED`] tombstone digest.
     fn unwrapped_then_deleted(&self) -> Vec<ObjectRef>;
     /// Objects that existed as top-level objects before this transaction and
     /// have been wrapped inside another object by it (i.e. no longer visible
     /// in the object store as top-level). References use the post-execution
-    /// version and the [`Digest::OBJECT_WRAPPED`] tombstone digest.
+    /// version and the [`TransactionEffectsDigest::OBJECT_WRAPPED`] tombstone digest.
     fn wrapped(&self) -> Vec<ObjectRef>;
     /// Returns a flattened view of every object change recorded in these
     /// effects: for each touched object, the input and output version/digest
@@ -143,12 +142,12 @@ pub trait TransactionEffectsAPI: transaction_effects_api::Sealed {
     fn gas_object(&self) -> (ObjectRef, Owner);
     /// Digest of the events emitted by this transaction, or `None` if it
     /// emitted no events.
-    fn events_digest(&self) -> Option<&Digest>;
+    fn events_digest(&self) -> Option<&TransactionEventsDigest>;
     /// Digests of the transactions this one depends on, i.e. transactions
     /// that must be executed before this one for its inputs to be available.
-    fn dependencies(&self) -> &[Digest];
+    fn dependencies(&self) -> &[TransactionDigest];
     /// Digest of the transaction that produced these effects.
-    fn transaction_digest(&self) -> &Digest;
+    fn transaction_digest(&self) -> &TransactionDigest;
     /// Return the gas cost summary of the transaction.
     fn gas_cost_summary(&self) -> &GasCostSummary;
     /// IDs of shared objects that were declared as mutable inputs by the
@@ -185,9 +184,9 @@ pub trait TransactionEffectsAPIForTesting: TransactionEffectsAPI {
     /// Returns a mutable reference to the gas cost summary, for tests.
     fn gas_cost_summary_mut_for_testing(&mut self) -> &mut GasCostSummary;
     /// Returns a mutable reference to the transaction digest, for tests.
-    fn transaction_digest_mut_for_testing(&mut self) -> &mut Digest;
+    fn transaction_digest_mut_for_testing(&mut self) -> &mut TransactionDigest;
     /// Returns a mutable reference to the dependency list, for tests.
-    fn dependencies_mut_for_testing(&mut self) -> &mut Vec<Digest>;
+    fn dependencies_mut_for_testing(&mut self) -> &mut Vec<TransactionDigest>;
     /// Records `kind` as an input shared object without validating that it is
     /// consistent with the rest of the effects. For tests only.
     fn unsafe_add_input_shared_object_for_testing(&mut self, kind: InputSharedObject);
@@ -250,12 +249,12 @@ pub fn new_from_execution_v1(
     gas_used: GasCostSummary,
     shared_objects: Vec<SharedInput>,
     loaded_per_epoch_config_objects: BTreeSet<ObjectID>,
-    transaction_digest: Digest,
+    transaction_digest: TransactionDigest,
     lamport_version: SequenceNumber,
     changed_objects: BTreeMap<ObjectID, EffectsObjectChange>,
     gas_object: Option<ObjectID>,
-    events_digest: Option<Digest>,
-    dependencies: Vec<Digest>,
+    events_digest: Option<TransactionEventsDigest>,
+    dependencies: Vec<TransactionDigest>,
 ) -> TransactionEffects {
     let unchanged_shared_objects = shared_objects
         .into_iter()
@@ -414,15 +413,15 @@ impl TransactionEffectsAPI for TransactionEffects {
         delegate_effects_api!(self, gas_object)
     }
 
-    fn events_digest(&self) -> Option<&Digest> {
+    fn events_digest(&self) -> Option<&TransactionEventsDigest> {
         delegate_effects_api!(self, events_digest)
     }
 
-    fn dependencies(&self) -> &[Digest] {
+    fn dependencies(&self) -> &[TransactionDigest] {
         delegate_effects_api!(self, dependencies)
     }
 
-    fn transaction_digest(&self) -> &Digest {
+    fn transaction_digest(&self) -> &TransactionDigest {
         delegate_effects_api!(self, transaction_digest)
     }
 
@@ -444,11 +443,11 @@ impl TransactionEffectsAPIForTesting for TransactionEffects {
         delegate_effects_api!(self, gas_cost_summary_mut_for_testing)
     }
 
-    fn transaction_digest_mut_for_testing(&mut self) -> &mut Digest {
+    fn transaction_digest_mut_for_testing(&mut self) -> &mut TransactionDigest {
         delegate_effects_api!(self, transaction_digest_mut_for_testing)
     }
 
-    fn dependencies_mut_for_testing(&mut self) -> &mut Vec<Digest> {
+    fn dependencies_mut_for_testing(&mut self) -> &mut Vec<TransactionDigest> {
         delegate_effects_api!(self, dependencies_mut_for_testing)
     }
 
