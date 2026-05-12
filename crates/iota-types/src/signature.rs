@@ -20,8 +20,9 @@ use crate::{
     base_types::IotaAddress,
     crypto::{
         CompressedSignature, IotaSignature, PasskeyAuthenticatorAsBytes, PublicKey, Signature,
-        SignatureScheme,
+        SignatureScheme, default_hash,
     },
+    digests::GenericSignatureDigest,
     error::{IotaError, IotaResult},
     move_authenticator::{MoveAuthenticator, MoveAuthenticatorInner, MoveAuthenticatorV1},
     multisig::MultiSig,
@@ -116,6 +117,10 @@ impl GenericSignature {
 
     pub fn is_move_authenticator(&self) -> bool {
         matches!(self, GenericSignature::MoveAuthenticator(_))
+    }
+
+    pub fn digest(&self) -> GenericSignatureDigest {
+        GenericSignatureDigest::new(default_hash(self))
     }
 
     pub fn verify_authenticator<T>(
@@ -284,6 +289,14 @@ impl AsRef<[u8]> for GenericSignature {
             GenericSignature::PasskeyAuthenticator(s) => s.as_ref(),
             GenericSignature::MoveAuthenticator(s) => s.as_ref(),
         }
+    }
+}
+
+impl<W: std::io::Write> crate::crypto::Signable<W> for GenericSignature {
+    fn write(&self, writer: &mut W) {
+        writer
+            .write_all(self.as_ref())
+            .expect("Hasher should not fail");
     }
 }
 

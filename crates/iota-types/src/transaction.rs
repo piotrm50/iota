@@ -43,7 +43,9 @@ use crate::{
         AuthorityStrongQuorumSignInfo, DefaultHash, Ed25519IotaSignature, EmptySignInfo,
         IotaSignatureInner, RandomnessRound, Signature, Signer, ToFromBytes,
     },
-    digests::{CertificateDigest, ConsensusCommitDigest, SenderSignedDataDigest},
+    digests::{
+        CertificateDigest, ConsensusCommitDigest, GenericSignatureDigest, SenderSignedDataDigest,
+    },
     event::Event,
     execution::SharedInput,
     message_envelope::{Envelope, Message, TrustedEnvelope, VerifiedEnvelope},
@@ -2091,6 +2093,50 @@ impl SenderSignedData {
                 Ok(addr) => addr == sender,
                 Err(_) => false,
             })
+    }
+
+    pub fn sponsor_move_authenticator(&self) -> Option<&MoveAuthenticator> {
+        let tx_data = self.transaction_data();
+
+        if tx_data.is_sponsored_tx() {
+            let gas_owner = tx_data.gas_owner();
+
+            self.move_authenticators()
+                .into_iter()
+                .find(|a| match a.address() {
+                    Ok(addr) => addr == gas_owner,
+                    Err(_) => false,
+                })
+        } else {
+            None
+        }
+    }
+
+    /// Computes the auth digests (Blake2b256 of the raw signature bytes) for
+    /// the sender and, if sponsored, for the sponsor.
+    pub fn compute_auth_digests(
+        &self,
+    ) -> IotaResult<(GenericSignatureDigest, Option<GenericSignatureDigest>)> {
+        let tx_data = self.transaction_data();
+
+        let find_digest = |address: IotaAddress| {
+            self.tx_signatures()
+                .iter()
+                .find(|sig| IotaAddress::try_from(*sig).ok() == Some(address))
+                .map(|sig| sig.digest())
+                .ok_or_else(|| IotaError::InvalidSignature {
+                    error: format!("no signature found for address {address}"),
+                })
+        };
+
+        let sender_auth_digest = find_digest(tx_data.sender())?;
+        let sponsor_auth_digest = if tx_data.is_sponsored_tx() {
+            Some(find_digest(tx_data.gas_owner())?)
+        } else {
+            None
+        };
+
+        Ok((sender_auth_digest, sponsor_auth_digest))
     }
 
     /// Returns all unique input objects including those from
