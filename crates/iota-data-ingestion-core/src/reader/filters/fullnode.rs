@@ -101,6 +101,19 @@ pub struct TransactionFilter(proto::TransactionFilter);
 
 impl TransactionFilter {
     /// Creates an empty filter.
+    ///
+    /// An empty filter is rejected by the fullnode. Add at least one leaf via
+    /// the builder methods (e.g. [`TransactionFilter::kinds`],
+    /// [`TransactionFilter::sender`]) before passing the filter to the
+    /// ingestion framework.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use iota_data_ingestion_core::filters::fullnode::{TransactionFilter, TransactionKind};
+    ///
+    /// let filter = TransactionFilter::new().kinds([TransactionKind::ProgrammableTransaction]);
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
@@ -140,6 +153,10 @@ impl TransactionFilter {
     }
 
     /// Matches transactions of any of the given [`TransactionKind`]s.
+    ///
+    /// Passing an empty iterator produces a filter that matches no
+    /// transactions (it is accepted by the fullnode but yields no results).
+    /// Pass at least one [`TransactionKind`].
     pub fn kinds(self, kinds: impl IntoIterator<Item = TransactionKind>) -> Self {
         let transaction_kinds_filter =
             kinds
@@ -166,7 +183,7 @@ impl TransactionFilter {
         )
     }
 
-    /// Matches transactions sent by the given object id.
+    /// Matches transactions sent by the given address.
     pub fn sender(self, address: IotaAddress) -> Self {
         self.and_with(
             proto::TransactionFilter::default()
@@ -397,6 +414,18 @@ pub struct EventFilter(proto::EventFilter);
 
 impl EventFilter {
     /// Creates an empty filter.
+    ///
+    /// An empty filter is rejected by the fullnode. Add at least one leaf via
+    /// the builder methods (e.g. [`EventFilter::event_type`]) before passing
+    /// the filter to the ingestion framework.
+    ///
+    /// # Example
+    ///
+    /// ```rust
+    /// use iota_data_ingestion_core::filters::fullnode::EventFilter;
+    ///
+    /// let filter = EventFilter::new().event_type("0xabcd::my_module::Foo");
+    /// ```
     pub fn new() -> Self {
         Self::default()
     }
