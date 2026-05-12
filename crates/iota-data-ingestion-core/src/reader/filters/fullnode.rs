@@ -62,32 +62,8 @@ use std::ops::Not;
 use iota_grpc_types::v1::filter as proto;
 use iota_types::base_types::{IotaAddress, ObjectID, ObjectRef};
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum TransactionKind {
-    SystemTransaction,
-    ProgrammableTransaction,
-    Genesis,
-    ConsensusCommitPrologueV1,
-    EndOfEpochTransaction,
-    RandomnessStateUpdate,
-}
-
-impl From<TransactionKind> for proto::TransactionKind {
-    fn from(kind: TransactionKind) -> Self {
-        match kind {
-            TransactionKind::SystemTransaction => proto::TransactionKind::SystemTransaction,
-            TransactionKind::ProgrammableTransaction => {
-                proto::TransactionKind::ProgrammableTransaction
-            }
-            TransactionKind::Genesis => proto::TransactionKind::Genesis,
-            TransactionKind::ConsensusCommitPrologueV1 => {
-                proto::TransactionKind::ConsensusCommitPrologueV1
-            }
-            TransactionKind::EndOfEpochTransaction => proto::TransactionKind::EndOfEpochTransaction,
-            TransactionKind::RandomnessStateUpdate => proto::TransactionKind::RandomnessStateUpdate,
-        }
-    }
-}
+/// Available transaction kinds for filtering.
+pub type TransactionKind = proto::TransactionKind;
 
 /// Filter applied to transactions in a fullnode checkpoint stream.
 ///
@@ -169,7 +145,7 @@ impl TransactionFilter {
             kinds
                 .into_iter()
                 .fold(proto::TransactionKindsFilter::default(), |mut acc, kind| {
-                    acc.push_kinds(kind.into());
+                    acc.push_kinds(kind);
                     acc
                 });
 
