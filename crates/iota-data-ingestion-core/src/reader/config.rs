@@ -41,7 +41,7 @@ pub use crate::{
 ///
 /// let config = CheckpointReaderConfigExt::new(ReaderOptions::default())
 ///     .with_remote_store_url(RemoteUrl::Fullnode("http://127.0.0.1:50051".into()))
-///     .with_fullnode_transaction_filter(TransactionFilter::execution_status(true));
+///     .with_fullnode_transaction_filter(TransactionFilter::new().execution_status(true));
 /// ```
 /// # Example with an existing [`CheckpointReaderConfig`]
 /// ```rust
@@ -58,7 +58,7 @@ pub use crate::{
 /// };
 ///
 /// let config = CheckpointReaderConfigExt::from(base_config)
-///     .with_fullnode_transaction_filter(TransactionFilter::execution_status(true));
+///     .with_fullnode_transaction_filter(TransactionFilter::new().execution_status(true));
 /// ```
 #[derive(Clone, Default)]
 pub struct CheckpointReaderConfigExt {
