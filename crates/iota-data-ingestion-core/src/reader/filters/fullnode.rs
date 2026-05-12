@@ -249,10 +249,7 @@ impl TransactionFilter {
 impl Not for TransactionFilter {
     type Output = Self;
     fn not(self) -> Self {
-        Self(
-            proto::TransactionFilter::default()
-                .with_negation(proto::NotTransactionFilter::default().with_filter(self.0)),
-        )
+        self.negate()
     }
 }
 
@@ -554,10 +551,7 @@ impl EventFilter {
 impl Not for EventFilter {
     type Output = Self;
     fn not(self) -> Self {
-        Self(
-            proto::EventFilter::default()
-                .with_negation(proto::NotEventFilter::default().with_filter(self.0)),
-        )
+        self.negate()
     }
 }
 
