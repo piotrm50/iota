@@ -9,7 +9,7 @@ publish = false
 [dependencies]
 # external dependencies
 bcs.workspace = true
-iota-sdk-crypto.workspace = true
+iota-sdk-crypto = { workspace = true, features = ["ed25519"] }
 
 # internal dependencies
 iota-genesis-builder.workspace = true
