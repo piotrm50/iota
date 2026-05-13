@@ -1,5 +1,9 @@
-// Copyright (c) 2025 IOTA Stiftung
+// Copyright (c) 2026 IOTA Stiftung
 // SPDX-License-Identifier: Apache-2.0
+
+//! Implements [`ClientMethods`] for the JSON-RPC [`IotaClient`], exposing it
+//! as a backend for the external `iota-sdk-transaction-builder` to build,
+//! dry-run, and submit transactions through.
 
 use std::{str::FromStr, time::Duration};
 
@@ -29,6 +33,12 @@ use iota_types::{
 };
 
 use crate::{IotaClient, error::Error};
+
+/// Default dry-run gas budget when none is supplied: 50 IOTA in nanos.
+const DEFAULT_DRY_RUN_BUDGET_NANOS: u64 = 50_000_000_000;
+
+/// Network-enforced minimum gas budget multiplier: `base_tx_cost_fixed`.
+const MIN_GAS_BUDGET_MULTIPLIER: u64 = 1000;
 
 impl ClientMethods for IotaClient {
     type Error = crate::error::Error;
@@ -340,12 +350,6 @@ impl ClientMethods for IotaClient {
         .map_err(|_| Error::Data("timeout waiting for transaction".to_string()))?
     }
 }
-
-/// Default dry-run gas budget when none is supplied: 50 IOTA in nanos.
-const DEFAULT_DRY_RUN_BUDGET_NANOS: u64 = 50_000_000_000;
-
-/// Network-enforced minimum gas budget multiplier: `base_tx_cost_fixed`.
-const MIN_GAS_BUDGET_MULTIPLIER: u64 = 1000;
 
 fn data_to_sdk_object(data: IotaObjectData) -> Result<Object, Error> {
     let core: CoreObject = data
