@@ -64,8 +64,9 @@ pub fn native_digest(
 /// Implementation of the Move native function `fun native_sender_auth_digest():
 /// &vector<u8>`
 ///
-/// Returns the sender's auth digest: Blake2b256 of the sender's raw signature
-/// bytes.
+/// Returns the sender's auth digest. For MoveAuthenticator signatures equals
+/// `MoveAuthenticator::digest()`; for others Blake2b256 of the serialized
+/// (flag-prefixed) signature bytes.
 /// ****************************************************************************
 pub fn native_sender_auth_digest(
     context: &mut NativeContext,
@@ -102,7 +103,9 @@ pub fn native_sender_auth_digest(
 /// native_sponsor_auth_digest(): &Option<vector<u8>>`
 ///
 /// Returns `None` for non-sponsored transactions. For sponsored transactions,
-/// returns `Some(Blake2b256(sponsor's raw signature bytes))`.
+/// returns the sponsor's auth digest: `MoveAuthenticator::digest()` for
+/// MoveAuthenticator signatures; Blake2b256 of the serialized (flag-prefixed)
+/// signature bytes for all others.
 /// ****************************************************************************
 pub fn native_sponsor_auth_digest(
     context: &mut NativeContext,

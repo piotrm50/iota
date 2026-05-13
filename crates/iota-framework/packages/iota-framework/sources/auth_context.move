@@ -35,14 +35,22 @@ public struct AuthContext has drop {
 
 // === Public functions ===
 
+/// Returns the MoveAuthenticator digest.
 public fun digest(_ctx: &AuthContext): &vector<u8> {
     native_digest()
 }
 
+/// Returns the sender's auth digest. For `MoveAuthenticator` signatures equals
+/// its digest; for all other signature types it is the Blake2b256 of the
+/// serialized (flag-prefixed) signature bytes.
 public fun sender_auth_digest(_ctx: &AuthContext): &vector<u8> {
     native_sender_auth_digest()
 }
 
+/// Returns the sponsor's auth digest for sponsored transactions, `none`
+/// otherwise. For `MoveAuthenticator` signatures equals its digest; for all
+/// other signature types it is the Blake2b256 of the serialized
+/// (flag-prefixed) signature bytes.
 public fun sponsor_auth_digest(_ctx: &AuthContext): &Option<vector<u8>> {
     native_sponsor_auth_digest()
 }

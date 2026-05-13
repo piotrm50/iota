@@ -25,7 +25,7 @@ pub use iota_sdk_types::{
     TransactionV1 as TransactionDataV1, TransferObjects, Upgrade,
 };
 use iota_sdk_types::{
-    Identifier, Input, ObjectId, TypeTag,
+    Digest, Identifier, Input, ObjectId, TypeTag,
     crypto::{Intent, IntentMessage, IntentScope},
 };
 use itertools::Either;
@@ -43,9 +43,7 @@ use crate::{
         AuthorityStrongQuorumSignInfo, DefaultHash, Ed25519IotaSignature, EmptySignInfo,
         IotaSignatureInner, RandomnessRound, Signature, Signer, ToFromBytes,
     },
-    digests::{
-        CertificateDigest, ConsensusCommitDigest, GenericSignatureDigest, SenderSignedDataDigest,
-    },
+    digests::{CertificateDigest, ConsensusCommitDigest, SenderSignedDataDigest},
     event::Event,
     execution::SharedInput,
     message_envelope::{Envelope, Message, TrustedEnvelope, VerifiedEnvelope},
@@ -2084,6 +2082,7 @@ impl SenderSignedData {
             .collect()
     }
 
+    /// Returns the senders's [`MoveAuthenticator`], if the sender uses one.
     pub fn sender_move_authenticator(&self) -> Option<&MoveAuthenticator> {
         let sender = self.intent_message().value.sender();
 
@@ -2095,6 +2094,8 @@ impl SenderSignedData {
             })
     }
 
+    /// Returns the sponsor's [`MoveAuthenticator`], if the transaction is
+    /// sponsored and the sponsor uses one.
     pub fn sponsor_move_authenticator(&self) -> Option<&MoveAuthenticator> {
         let tx_data = self.transaction_data();
 
@@ -2112,26 +2113,35 @@ impl SenderSignedData {
         }
     }
 
-    /// Computes the auth digests (Blake2b256 of the raw signature bytes) for
-    /// the sender and, if sponsored, for the sponsor.
-    pub fn compute_auth_digests(
-        &self,
-    ) -> IotaResult<(GenericSignatureDigest, Option<GenericSignatureDigest>)> {
+    /// Computes the auth digest for the sender and, if sponsored, for the
+    /// sponsor.
+    ///
+    /// For [`MoveAuthenticator`] signatures this equals
+    /// [`MoveAuthenticator::digest()`]. For all other signature types it is the
+    /// Blake2b256 of the serialized (flag-prefixed) signature bytes.
+    pub fn compute_auth_digests(&self) -> IotaResult<(Digest, Option<Digest>)> {
         let tx_data = self.transaction_data();
 
-        let find_digest = |address: IotaAddress| {
+        let compute_digest = |address: IotaAddress| {
             self.tx_signatures()
                 .iter()
                 .find(|sig| IotaAddress::try_from(*sig).ok() == Some(address))
-                .map(|sig| sig.digest())
+                .map(|sig| match sig {
+                    GenericSignature::MoveAuthenticator(authenticator) => authenticator.digest(),
+                    _ => {
+                        let mut hasher = DefaultHash::default();
+                        hasher.update(sig.as_ref());
+                        Digest::new(hasher.finalize().into())
+                    }
+                })
                 .ok_or_else(|| IotaError::InvalidSignature {
                     error: format!("no signature found for address {address}"),
                 })
         };
 
-        let sender_auth_digest = find_digest(tx_data.sender())?;
+        let sender_auth_digest = compute_digest(tx_data.sender())?;
         let sponsor_auth_digest = if tx_data.is_sponsored_tx() {
-            Some(find_digest(tx_data.gas_owner())?)
+            Some(compute_digest(tx_data.gas_owner())?)
         } else {
             None
         };

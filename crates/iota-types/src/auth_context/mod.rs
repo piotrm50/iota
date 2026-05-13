@@ -13,7 +13,7 @@ use serde::Serialize;
 
 use crate::{
     IOTA_FRAMEWORK_ADDRESS,
-    digests::{GenericSignatureDigest, MoveAuthenticatorDigest},
+    digests::{Digest, MoveAuthenticatorDigest},
     transaction::ProgrammableTransaction,
 };
 
@@ -36,7 +36,7 @@ pub const AUTH_CONTEXT_STRUCT_NAME: &IdentStr = ident_str!("AuthContext");
 ///
 /// Typical use:
 /// ```move
-/// public fun authenticate(account: &Account, signature: &vector<u8>, auth_ctx: &AuthContext, , ctx: &TxContext) {
+/// public fun authenticate(account: &Account, signature: &vector<u8>, auth_ctx: &AuthContext, ctx: &TxContext) {
 ///     assert!(ed25519::ed25519_verify(signature, &account.pub_key, ctx.digest()), EEd25519VerificationFailed);
 ///
 ///     assert!(is_authorized(&extract_function_key(&auth_ctx)), EUnauthorized);
@@ -49,12 +49,15 @@ pub const AUTH_CONTEXT_STRUCT_NAME: &IdentStr = ident_str!("AuthContext");
 pub struct AuthContext {
     /// The digest of the MoveAuthenticator
     auth_digest: MoveAuthenticatorDigest,
-    /// The sender's auth digest: Blake2b256 of the sender's raw signature
-    /// bytes.
-    sender_auth_digest: GenericSignatureDigest,
+    /// The sender's auth digest. For [`MoveAuthenticator`] signatures equals
+    /// [`MoveAuthenticator::digest()`]; for others Blake2b256 of the
+    /// serialized (flag-prefixed) signature bytes.
+    sender_auth_digest: Digest,
     /// The sponsor's auth digest, present only for sponsored transactions.
-    /// Blake2b256 of the sponsor's raw signature bytes.
-    sponsor_auth_digest: Option<GenericSignatureDigest>,
+    /// For [`MoveAuthenticator`] signatures equals
+    /// [`MoveAuthenticator::digest()`]; for others Blake2b256 of the
+    /// serialized (flag-prefixed) signature bytes.
+    sponsor_auth_digest: Option<Digest>,
     /// The authentication input objects or primitive values
     tx_inputs: Vec<MoveCallArg>,
     /// The authentication commands to be executed sequentially.
@@ -66,8 +69,8 @@ pub struct AuthContext {
 impl AuthContext {
     pub fn new_from_components(
         auth_digest: MoveAuthenticatorDigest,
-        sender_auth_digest: GenericSignatureDigest,
-        sponsor_auth_digest: Option<GenericSignatureDigest>,
+        sender_auth_digest: Digest,
+        sponsor_auth_digest: Option<Digest>,
         ptb: &ProgrammableTransaction,
         tx_data_bytes: Vec<u8>,
     ) -> Self {
@@ -84,7 +87,7 @@ impl AuthContext {
     pub fn new_for_testing() -> Self {
         Self {
             auth_digest: MoveAuthenticatorDigest::default(),
-            sender_auth_digest: GenericSignatureDigest::default(),
+            sender_auth_digest: Digest::default(),
             sponsor_auth_digest: None,
             tx_inputs: Vec::new(),
             tx_commands: Vec::new(),
@@ -92,21 +95,23 @@ impl AuthContext {
         }
     }
 
-    /// Returns the MoveAuthenticator digest: Blake2b256 of the
-    /// MoveAuthenticator bytes.
+    /// Returns the MoveAuthenticator digest.
     pub fn digest(&self) -> &MoveAuthenticatorDigest {
         &self.auth_digest
     }
 
-    /// Returns the sender's auth digest: Blake2b256 of the sender's raw
-    /// signature bytes.
-    pub fn sender_auth_digest(&self) -> &GenericSignatureDigest {
+    /// Returns the sender's auth digest. For [`MoveAuthenticator`] signatures
+    /// equals [`MoveAuthenticator::digest()`]; for others Blake2b256 of the
+    /// serialized (flag-prefixed) signature bytes.
+    pub fn sender_auth_digest(&self) -> &Digest {
         &self.sender_auth_digest
     }
 
     /// Returns the sponsor's auth digest for sponsored transactions, `None`
-    /// otherwise. Blake2b256 of the sponsor's raw signature bytes.
-    pub fn sponsor_auth_digest(&self) -> Option<&GenericSignatureDigest> {
+    /// otherwise. For [`MoveAuthenticator`] signatures equals
+    /// [`MoveAuthenticator::digest()`]; for others Blake2b256 of the
+    /// serialized (flag-prefixed) signature bytes.
+    pub fn sponsor_auth_digest(&self) -> Option<&Digest> {
         self.sponsor_auth_digest.as_ref()
     }
 
@@ -172,8 +177,8 @@ impl AuthContext {
         tx_inputs: Vec<MoveCallArg>,
         tx_commands: Vec<MoveCommand>,
         tx_data_bytes: Vec<u8>,
-        sender_auth_digest: GenericSignatureDigest,
-        sponsor_auth_digest: Option<GenericSignatureDigest>,
+        sender_auth_digest: Digest,
+        sponsor_auth_digest: Option<Digest>,
     ) {
         self.auth_digest = auth_digest;
         self.tx_inputs = tx_inputs;
@@ -226,8 +231,8 @@ mod tests {
     #[test]
     fn auth_context_new_from_components() {
         let auth_digest = MoveAuthenticatorDigest::new([1u8; 32]);
-        let sender_auth_digest = GenericSignatureDigest::new([2u8; 32]);
-        let sponsor_auth_digest = Some(GenericSignatureDigest::new([3u8; 32]));
+        let sender_auth_digest = Digest::new([2u8; 32]);
+        let sponsor_auth_digest = Some(Digest::new([3u8; 32]));
         let tx_data_bytes = vec![0xde, 0xad, 0xbe, 0xef];
 
         let ptb = ProgrammableTransaction {
@@ -290,7 +295,7 @@ mod tests {
             vec![MoveCallArg::Pure(vec![1])],
             vec![],
             vec![],
-            GenericSignatureDigest::default(),
+            Digest::default(),
             None,
         );
         let non_empty_bytes = ctx.to_bcs_bytes();

@@ -6182,7 +6182,7 @@ impl NodeStateDump {
 /// Returns the [`MoveAuthenticator`]s to execute during the pre-consensus
 /// phase.
 ///
-/// When `only_sponsor_move_authentication_pre_consensus` is enabled:
+/// When `pre_consensus_sponsor_only_move_authentication` is enabled:
 /// - For sponsored transactions: only the sponsor's [`MoveAuthenticator`] is
 ///   returned (empty if the sponsor does not use one).
 /// - For non-sponsored transactions: all [`MoveAuthenticator`]s are returned

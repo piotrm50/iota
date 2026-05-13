@@ -6,7 +6,7 @@ use std::{cell::RefCell, rc::Rc};
 use better_any::{Tid, TidAble};
 use iota_types::{
     auth_context::{AuthContext, MoveCallArg, MoveCommand},
-    digests::{GenericSignatureDigest, MoveAuthenticatorDigest},
+    digests::{Digest, MoveAuthenticatorDigest},
 };
 use move_binary_format::errors::{PartialVMError, PartialVMResult};
 use move_core_types::{
@@ -283,7 +283,7 @@ impl AuthenticationContext {
             tx_data_bytes_opt.unwrap_or_else(|| self.auth_context.borrow().tx_data_bytes().clone());
 
         let parse_digest = |bytes: Vec<u8>| {
-            GenericSignatureDigest::from_bytes(bytes.as_slice()).map_err(|err| {
+            Digest::from_bytes(bytes.as_slice()).map_err(|err| {
                 PartialVMError::new(StatusCode::UNEXPECTED_DESERIALIZATION_ERROR)
                     .with_message(err.to_string())
             })

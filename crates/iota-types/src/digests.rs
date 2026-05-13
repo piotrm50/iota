@@ -149,7 +149,6 @@ pub type ObjectDigest = Digest;
 pub type ConsensusCommitDigest = Digest;
 pub type MoveAuthenticatorDigest = Digest;
 pub type MisbehaviorReportDigest = Digest;
-pub type GenericSignatureDigest = Digest;
 
 mod test {
     #[allow(unused_imports)]

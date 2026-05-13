@@ -30,7 +30,7 @@ mod checked {
         },
         clock::CONSENSUS_COMMIT_PROLOGUE_FUNCTION_NAME,
         committee::EpochId,
-        digests::GenericSignatureDigest,
+        digests::Digest,
         effects::TransactionEffects,
         error::{ExecutionError, ExecutionErrorKind},
         execution::{ExecutionResults, ExecutionResultsV1, SharedInput, is_certificate_denied},
@@ -316,8 +316,8 @@ mod checked {
         transaction_signer: IotaAddress,
         transaction_digest: TransactionDigest,
         transaction_data_bytes: Vec<u8>,
-        sender_auth_digest: GenericSignatureDigest,
-        sponsor_auth_digest: Option<GenericSignatureDigest>,
+        sender_auth_digest: Digest,
+        sponsor_auth_digest: Option<Digest>,
         // Tracing
         trace_builder_opt: &mut Option<MoveTraceBuilder>,
         // VM
@@ -510,8 +510,8 @@ mod checked {
         transaction_signer: IotaAddress,
         transaction_digest: TransactionDigest,
         transaction_data_bytes: Vec<u8>,
-        sender_auth_digest: GenericSignatureDigest,
-        sponsor_auth_digest: Option<GenericSignatureDigest>,
+        sender_auth_digest: Digest,
+        sponsor_auth_digest: Option<Digest>,
         // Tracing
         trace_builder_opt: &mut Option<MoveTraceBuilder>,
         // VM
@@ -602,8 +602,8 @@ mod checked {
         transaction_kind: TransactionKind,
         transaction_digest: TransactionDigest,
         tx_data_bytes: Vec<u8>,
-        sender_auth_digest: GenericSignatureDigest,
-        sponsor_auth_digest: Option<GenericSignatureDigest>,
+        sender_auth_digest: Digest,
+        sponsor_auth_digest: Option<Digest>,
         tx_ctx: Rc<RefCell<TxContext>>,
         // Tracing
         trace_builder_opt: &mut Option<MoveTraceBuilder>,
