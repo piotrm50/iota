@@ -59,8 +59,8 @@
 
 use std::ops::Not;
 
-use iota_grpc_types::v1::filter as proto;
-use iota_types::base_types::{IotaAddress, ObjectID, ObjectRef};
+use iota_grpc_types::v1::{filter as proto, types::ObjectReference};
+use iota_types::base_types::{IotaAddress, ObjectDigest, ObjectID, SequenceNumber};
 
 /// Available transaction kinds for filtering.
 pub type TransactionKind = proto::TransactionKind;
@@ -199,8 +199,29 @@ impl TransactionFilter {
         )
     }
 
-    /// Matches transactions that touch the given object.
-    pub fn affected_object(self, object_ref: ObjectRef) -> Self {
+    /// Matches transactions that touch the given object id.
+    pub fn affected_object(self, object_id: ObjectID) -> Self {
+        let object_ref = ObjectReference::default().with_object_id(object_id);
+        self.and_with(
+            proto::TransactionFilter::default()
+                .with_affected_object(proto::ObjectIdFilter::default().with_object_ref(object_ref)),
+        )
+    }
+
+    /// Matches transactions that touch the given object id and version.
+    pub fn affected_object_version(self, object_id: ObjectID, version: SequenceNumber) -> Self {
+        let object_ref = ObjectReference::default()
+            .with_object_id(object_id)
+            .with_version(version.as_u64());
+        self.and_with(
+            proto::TransactionFilter::default()
+                .with_affected_object(proto::ObjectIdFilter::default().with_object_ref(object_ref)),
+        )
+    }
+
+    /// Matches transactions that touch the given object digest.
+    pub fn affected_object_digest(self, object_digest: ObjectDigest) -> Self {
+        let object_ref = ObjectReference::default().with_digest(object_digest);
         self.and_with(
             proto::TransactionFilter::default()
                 .with_affected_object(proto::ObjectIdFilter::default().with_object_ref(object_ref)),
