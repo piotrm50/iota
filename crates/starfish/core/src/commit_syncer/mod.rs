@@ -53,7 +53,10 @@ use crate::{
         BlockHeaderAPI, SignedBlockHeader, TransactionsCommitment, VerifiedTransactions,
     },
     block_verifier::BlockVerifier,
-    commit::{Commit, CommitAPI as _, CommitDigest, CommitRange, CommitRef, TrustedCommit},
+    commit::{
+        Commit, CommitAPI as _, CommitDigest, CommitRange, CommitRef, TrustedCommit,
+        check_commit_version_matches_flags,
+    },
     commit_vote_monitor::CommitVoteMonitor,
     context::Context,
     core_thread::CoreThreadDispatcher,
@@ -212,6 +215,7 @@ impl<C: NetworkClient> Inner<C> {
         for serialized in &serialized_commits {
             let commit: Commit =
                 bcs::from_bytes(serialized).map_err(ConsensusError::MalformedCommit)?;
+            check_commit_version_matches_flags(&commit, &self.context.protocol_config)?;
             let digest = TrustedCommit::compute_digest(serialized);
             if commits.is_empty() {
                 // start is inclusive, so first commit must be at the start index.
