@@ -1183,8 +1183,7 @@ impl GrpcReader {
                                 crate::error::RpcError::new(
                                     tonic::Code::Internal,
                                     format!(
-                                        "Checkpoint summary {} not found for transaction {}",
-                                        checkpoint_seq, digest
+                                        "Checkpoint summary {checkpoint_seq} not found for transaction {digest}"
                                     ),
                                 )
                             })?;
