@@ -700,6 +700,12 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
             serialized_block_bundle_parts.serialized_block.clone(),
             encoder,
         )?;
+        // Fault injection: receive-side bumps for unprovable / equivocation.
+        crate::fault_injection::maybe_inject_on_receive(
+            &self.misbehavior_store,
+            peer,
+            peer_hostname.as_str(),
+        );
         let block_ref = verified_block.reference();
         let transaction_ref = verified_block.transaction_ref();
         let gen_transaction_ref = if self.context.protocol_config.consensus_fast_commit_sync() {

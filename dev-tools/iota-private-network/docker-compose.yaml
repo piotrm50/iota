@@ -2,10 +2,11 @@ x-common-validator: &common-validator
   image: iotaledger/iota-node
   environment: &common-env
     - RUST_BACKTRACE=1
-    - RUST_LOG=info,iota_core=debug,iota_network=debug,iota_node=debug,jsonrpsee=error
+    - RUST_LOG=info,iota_core=debug,iota_network=debug,iota_node=debug,jsonrpsee=error,fault_injection=warn
     - RPC_WORKER_THREAD=12
     - NEW_CHECKPOINT_WARNING_TIMEOUT_MS=30000
     - NEW_CHECKPOINT_PANIC_TIMEOUT_MS=60000
+    - IOTA_FAULT_INJECTION_LOG_SCORES=1
   command: &common-command [
     "/usr/local/bin/iota-node",
     "--config-path",
@@ -40,6 +41,7 @@ services:
       - ./configs/genesis/genesis.blob:/opt/iota/config/genesis.blob:ro
       - ./data/validator-1:/opt/iota/db:rw
 
+
   validator-2:
     <<: *common-validator
     container_name: validator-2
@@ -52,6 +54,7 @@ services:
       - ./configs/genesis/genesis.blob:/opt/iota/config/genesis.blob:ro
       - ./data/validator-2:/opt/iota/db:rw
 
+
   validator-3:
     <<: *common-validator
     container_name: validator-3
@@ -63,6 +66,23 @@ services:
       - ./configs/validators/validator-3-8080.yaml:/opt/iota/config/validator.yaml:ro
       - ./configs/genesis/genesis.blob:/opt/iota/config/genesis.blob:ro
       - ./data/validator-3:/opt/iota/db:rw
+    # Fault-injection (test branch only). Duplicates the env block from
+    # x-common-validator because `environment` replaces (not merges) when
+    # set alongside an anchor.
+    environment:
+      - RUST_BACKTRACE=1
+      - RUST_LOG=info,iota_core=debug,iota_network=debug,iota_node=debug,jsonrpsee=error,fault_injection=warn
+      - RPC_WORKER_THREAD=12
+      - NEW_CHECKPOINT_WARNING_TIMEOUT_MS=30000
+      - NEW_CHECKPOINT_PANIC_TIMEOUT_MS=60000
+      # Modes: header,missed,invalid_report on self; unprovable,equivocation
+      # on receive (byzantine reports: v3 falsely flags every peer it hears
+      # from). With 4 validators and majority median, the false reports get
+      # filtered — only v3's real (provable) faults end up scored.
+      - IOTA_FAULT_INJECTION_MODE=header,missed,invalid_report,unprovable,equivocation
+      - IOTA_FAULT_INJECTION_RATE=0.01
+      - IOTA_FAULT_INJECTION_DET_MOD=17
+      - IOTA_FAULT_INJECTION_LOG_SCORES=1
 
   validator-4:
     <<: *common-validator
@@ -75,6 +95,7 @@ services:
       - ./configs/validators/validator-4-8080.yaml:/opt/iota/config/validator.yaml:ro
       - ./configs/genesis/genesis.blob:/opt/iota/config/genesis.blob:ro
       - ./data/validator-4:/opt/iota/db:rw
+
 
   validator-5:
     <<: *common-validator

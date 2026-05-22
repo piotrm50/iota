@@ -762,8 +762,32 @@ impl Core {
         if !self.should_propose() {
             return Ok((None, BTreeMap::new()));
         }
+        // Fault injection: deterministically drop this proposal to surface
+        // missing_proposals on observers.
+        let inj = crate::fault_injection::config();
+        let own_host = &self
+            .context
+            .committee
+            .authority(self.context.own_index)
+            .hostname;
+        if inj.modes.missed
+            && crate::fault_injection::authority_in_scope(own_host)
+        {
+            let round = self.dag_state.read().threshold_clock_round();
+            if crate::fault_injection::deterministic_match(round) {
+                tracing::warn!(
+                    target: "fault_injection",
+                    round, "injecting missed-proposal",
+                );
+                return Ok((None, BTreeMap::new()));
+            }
+        }
         if let Some(verified_block) = self.try_new_block(reason) {
             self.signals.new_block(verified_block.clone())?;
+
+            // Fault injection: broadcast sibling block(s) to surface
+            // equivocations and/or faulty_blocks_provable on observers.
+            self.maybe_inject_sibling_blocks(&verified_block)?;
 
             fail_point!("consensus-after-propose");
 
@@ -772,6 +796,89 @@ impl Core {
             return Ok((Some(verified_block), missing_committed_txns));
         }
         Ok((None, BTreeMap::new()))
+    }
+
+    /// Broadcasts sibling blocks to other peers if fault injection is enabled.
+    /// Local DAG state is unaffected (only the original valid block is
+    /// accepted). Modes:
+    /// - `equivocation` (deterministic): sibling with `timestamp_ms + 1` —
+    ///   identical content otherwise, triggers equivocation detection.
+    /// - `header` (probabilistic): sibling with a duplicated first ancestor —
+    ///   triggers `DuplicatedAncestorsAuthority` provable fault on peers (also
+    ///   counted as equivocation since two refs at the same slot exist).
+    fn maybe_inject_sibling_blocks(
+        &self,
+        original: &VerifiedBlock,
+    ) -> ConsensusResult<()> {
+        let inj = crate::fault_injection::config();
+        let own_host = &self
+            .context
+            .committee
+            .authority(self.context.own_index)
+            .hostname;
+        if !crate::fault_injection::authority_in_scope(own_host) {
+            return Ok(());
+        }
+        let round = original.round();
+        // Note: `equivocation` mode lives on the receive side (see
+        // `fault_injection::maybe_inject_on_receive`); broadcasting a sibling
+        // here can't pass peer-side per-shard merkle commitment checks.
+        if inj.modes.header && crate::fault_injection::roll() {
+            let mut ancestors: Vec<BlockRef> = original.ancestors().to_vec();
+            if !ancestors.is_empty() {
+                // Duplicate the first ancestor's authority by appending it.
+                ancestors.push(ancestors[0]);
+            }
+            let sibling = self.build_signed_sibling(
+                original,
+                round,
+                original.timestamp_ms().saturating_add(2),
+                ancestors,
+                original.acknowledgments().to_vec(),
+                original.commit_votes().to_vec(),
+                original.transactions_commitment(),
+            );
+            if let Some(block) = sibling {
+                tracing::warn!(
+                    target: "fault_injection",
+                    round, "injecting corrupt-header sibling",
+                );
+                let _ = self.signals.new_block(block);
+            }
+        }
+        Ok(())
+    }
+
+    fn build_signed_sibling(
+        &self,
+        original: &VerifiedBlock,
+        round: Round,
+        timestamp_ms: BlockTimestampMs,
+        ancestors: Vec<BlockRef>,
+        acknowledgments: Vec<BlockRef>,
+        commit_votes: Vec<crate::commit::CommitVote>,
+        transactions_commitment: TransactionsCommitment,
+    ) -> Option<VerifiedBlock> {
+        let header = BlockHeader::V1(BlockHeaderV1::new(
+            self.context.committee.epoch(),
+            round,
+            self.context.own_index,
+            timestamp_ms,
+            ancestors,
+            acknowledgments,
+            commit_votes,
+            transactions_commitment,
+        ));
+        let signed = SignedBlockHeader::new(header, &self.block_signer).ok()?;
+        let serialized = signed.serialize().ok()?;
+        let verified_header = VerifiedBlockHeader::new_verified(signed, serialized);
+        // Clone the original's transactions so the receiver-side
+        // transactions_commitment check passes; the only difference from
+        // `original` is the header bytes (timestamp / ancestors).
+        Some(VerifiedBlock {
+            verified_block_header: verified_header,
+            verified_transactions: original.verified_transactions.clone(),
+        })
     }
 
     /// Attempts to propose a new block at the current clock round. Eligibility

@@ -25,8 +25,10 @@ use crate::{
 };
 
 const REPORT_END_OF_EPOCH_MARGIN_MS: u64 = 2000;
-const MIN_CHECKPOINTS_BETWEEN_REPORTS: u64 = 1000;
-const MAX_CHECKPOINT_LAG_FOR_REPORT: u64 = 100;
+// Test branch: drastically lowered (production = 1000) so misbehavior reports
+// flow within seconds and we can watch the scoreboard update in real time.
+const MIN_CHECKPOINTS_BETWEEN_REPORTS: u64 = 20;
+const MAX_CHECKPOINT_LAG_FOR_REPORT: u64 = 1000;
 #[async_trait]
 pub trait CheckpointOutput: Sync + Send + 'static {
     async fn checkpoint_created(
@@ -158,11 +160,38 @@ impl<T: SubmitToConsensus + ReconfigurationInitiator> CheckpointOutput
                     >= highest_verified_checkpoint)
                 || should_send_last_report
             {
-                let misbehavior_report = epoch_store
+                let mut misbehavior_report = epoch_store
                     .misbehavior_monitor
                     .generate_report(checkpoint_seq);
                 let new_report_summary = misbehavior_report.summary();
                 if new_report_summary != rl.last_report_summary || should_send_last_report {
+                    // Fault injection: probabilistically corrupt the report's
+                    // shape so receivers reject it via `validate_report` and
+                    // bump `invalid_misbehavior_reports_by_authority`.
+                    if matches!(
+                        std::env::var("IOTA_FAULT_INJECTION_MODE").as_deref(),
+                        Ok(s) if s.split(',').any(|m| m.trim() == "invalid_report")
+                    ) {
+                        use rand::Rng as _;
+                        let rate: f64 = std::env::var("IOTA_FAULT_INJECTION_RATE")
+                            .ok()
+                            .and_then(|s| s.parse().ok())
+                            .unwrap_or(0.05);
+                        if rand::thread_rng().gen::<f64>() < rate {
+                            use iota_types::messages_consensus::MisbehaviorObservations;
+                            let MisbehaviorObservations::V1(payload) =
+                                &mut misbehavior_report.payload;
+                            if !payload.faulty_blocks_provable.is_empty() {
+                                payload.faulty_blocks_provable.pop();
+                            } else {
+                                payload.faulty_blocks_provable.push(0);
+                            }
+                            tracing::warn!(
+                                target: "fault_injection",
+                                "injecting invalid misbehavior report",
+                            );
+                        }
+                    }
                     let transaction =
                         ConsensusTransaction::new_misbehavior_report(misbehavior_report);
                     info!(?transaction, "submitting misbehavior report to consensus");

@@ -24,6 +24,7 @@ mod leader_timeout;
 mod linearizer;
 mod metrics;
 mod misbehavior_store;
+mod fault_injection;
 #[cfg(not(msim))]
 mod network;
 #[cfg(msim)]

@@ -161,7 +161,7 @@ impl<C> ConsensusHandler<C> {
 
         // Seed the gauges so series exist from epoch start, not only after the
         // first commit.
-        publish_scoring_gauges(&epoch_store, &committee, &metrics);
+        publish_scoring_gauges(&epoch_store, &committee, &metrics, None);
 
         Self {
             epoch_store,
@@ -404,7 +404,12 @@ impl<C: CheckpointServiceNotify + Send + Sync> ConsensusHandler<C> {
             .await
             .expect("Unrecoverable error in consensus handler");
 
-        publish_scoring_gauges(&self.epoch_store, &self.committee, &self.metrics);
+        publish_scoring_gauges(
+            &self.epoch_store,
+            &self.committee,
+            &self.metrics,
+            Some(commit_sub_dag_index),
+        );
 
         fail_point_if!("correlated-crash-after-consensus-commit-boundary", || {
             let key = [commit_sub_dag_index, self.epoch_store.epoch()];
@@ -428,6 +433,7 @@ fn publish_scoring_gauges(
     epoch_store: &AuthorityPerEpochStore,
     committee: &ConsensusCommittee,
     metrics: &AuthorityMetrics,
+    commit_index: Option<u64>,
 ) {
     if !epoch_store.protocol_config().calculate_validator_scores() {
         return;
@@ -444,6 +450,41 @@ fn publish_scoring_gauges(
             .invalid_misbehavior_reports_by_authority
             .with_label_values(labels)
             .set(invalid_reports[i.value()] as i64);
+    }
+    // Test-only score-convergence log. Includes the consensus commit index
+    // so log lines can be matched across observers at the same point in the
+    // commit stream. Deduplicates consecutive identical snapshots (the hash
+    // only changes when scores or invalid_reports change), so the log fires
+    // exactly when state changes.
+    if std::env::var("IOTA_FAULT_INJECTION_LOG_SCORES").is_ok() {
+        use std::hash::{Hash, Hasher};
+        use std::sync::atomic::{AtomicU64, Ordering};
+        let mut by_host: Vec<(String, u64, u64)> = committee
+            .authorities()
+            .map(|(i, a)| (a.hostname.clone(), scores[i.value()], invalid_reports[i.value()]))
+            .collect();
+        by_host.sort_by(|a, b| a.0.cmp(&b.0));
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        for (h, s, inv) in &by_host {
+            h.hash(&mut hasher);
+            s.hash(&mut hasher);
+            inv.hash(&mut hasher);
+        }
+        let h = hasher.finish();
+        // Process-local dedup. Skip when the snapshot hash is identical to
+        // the last logged one — bumps for invalid_reports / score changes
+        // get a fresh hash and re-fire.
+        static LAST_HASH: AtomicU64 = AtomicU64::new(0);
+        let prev = LAST_HASH.swap(h, Ordering::Relaxed);
+        if prev != h {
+            tracing::warn!(
+                target: "fault_injection",
+                commit_index = commit_index.map(|i| i as i64).unwrap_or(-1),
+                score_vector_hash = format!("{h:016x}"),
+                scores = ?by_host,
+                "validator score snapshot",
+            );
+        }
     }
 }
 

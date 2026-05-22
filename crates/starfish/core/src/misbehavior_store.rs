@@ -163,25 +163,26 @@ impl MisbehaviorStore {
         true
     }
 
-    /// Returns an absolute per-authority snapshot of `persisted + in_memory`
-    /// counts for emission with `CommittedSubDag`. Locks the two buckets
-    /// independently per authority; callers must hold `dag_state.read()` so
-    /// concurrent flush (which writes both buckets under `dag_state.write()`)
-    /// is excluded.
+    /// Returns the **persisted** per-authority counts only — i.e. counts for
+    /// rounds that have been evicted from the cache and are therefore
+    /// immutable for the remainder of the epoch. `in_memory` is deliberately
+    /// excluded because:
+    /// - `missing_proposals` and `equivocations` in `in_memory` are
+    ///   recomputed on each flush from the cache window and can DECREASE
+    ///   when a late block arrives. Emitting them in a `CommittedSubDag`
+    ///   would propagate values to `update_from_consensus_output`, whose
+    ///   `merge_max` locks any transient over-count for the rest of the
+    ///   epoch and may bake an unjust penalty into the score.
+    /// - `faulty_blocks_*` in `in_memory` are an additive buffer drained to
+    ///   `persisted` on every flush; the small lag is acceptable in exchange
+    ///   for never reporting an in-flight value.
+    ///
+    /// Locks each persisted authority Mutex once. Callers must hold
+    /// `dag_state.read()` so concurrent flush (which writes both buckets
+    /// under `dag_state.write()`) is excluded.
     pub(crate) fn snapshot_totals(&self) -> Vec<MisbehaviorCounts> {
-        (0..self.in_memory.authorities.len())
-            .map(|i| {
-                let persisted = self.persisted.snapshot(i);
-                let in_memory = self.in_memory.snapshot(i);
-                MisbehaviorCounts::V1(MisbehaviorCountsV1 {
-                    faulty_blocks_provable: persisted.faulty_blocks_provable
-                        + in_memory.faulty_blocks_provable,
-                    faulty_blocks_unprovable: persisted.faulty_blocks_unprovable
-                        + in_memory.faulty_blocks_unprovable,
-                    missing_proposals: persisted.missing_proposals + in_memory.missing_proposals,
-                    equivocations: persisted.equivocations + in_memory.equivocations,
-                })
-            })
+        (0..self.persisted.authorities.len())
+            .map(|i| MisbehaviorCounts::V1(self.persisted.snapshot(i)))
             .collect()
     }
 
@@ -230,6 +231,22 @@ impl MisbehaviorStore {
                 self.in_memory.record_block_fault_unprovable(peer_idx);
             }
             FaultType::Untracked => {}
+        }
+    }
+
+    /// Test-only fault-injection helpers. Bump misbehavior counters directly
+    /// without going through the real protocol path. Used by
+    /// `fault_injection` on block receive to simulate unprovable faults and
+    /// equivocations without having to legitimately produce them on the wire.
+    pub(crate) fn inject_unprovable_for_test(&self, peer_idx: usize) {
+        if peer_idx < self.in_memory.authorities.len() {
+            self.in_memory.record_block_fault_unprovable(peer_idx);
+        }
+    }
+
+    pub(crate) fn inject_equivocation_for_test(&self, idx: usize) {
+        if idx < self.persisted.authorities.len() {
+            self.persisted.add_dag_faults(idx, 0, 1);
         }
     }
 }
@@ -881,7 +898,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_snapshot_totals_sums_persisted_and_in_memory() {
+    async fn test_snapshot_totals_returns_persisted_only() {
         let committee_size = 4;
         let context = Arc::new(Context::new_for_test(committee_size).0);
         let store = MisbehaviorStore::new(&context);
@@ -895,27 +912,28 @@ mod tests {
         store.record_faulty_block_header(a1, a1, &provable);
 
         // Flush faulty buffer for authority 0 into persisted; leave authority 1
-        // unflushed so the snapshot must sum across both buckets.
+        // unflushed so the snapshot will exclude its in_memory bump.
         let _ =
             store.update_misbehavior_counts_on_eviction(a0, &BTreeSet::new(), 0, 0, 1, &context);
 
-        // Record 3 more provable faults on authority 0 — these stay in_memory.
+        // Record 3 more provable faults on authority 0 — these stay in_memory
+        // and must NOT appear in the snapshot.
         for _ in 0..3 {
             store.record_faulty_block_header(a0, a0, &provable);
         }
 
         let snapshot = store.snapshot_totals();
         assert_eq!(snapshot.len(), committee_size);
-        // Authority 0: 2 flushed into persisted + 3 still in_memory = 5 total.
-        // Authority 1: 1 still in_memory (never flushed) = 1 total.
-        // Untouched authorities are zero across both buckets.
+        // Authority 0: 2 flushed into persisted, 3 still in_memory → snapshot
+        // reports 2 (persisted only, in_memory excluded by design).
+        // Authority 1: 1 still in_memory (never flushed) → snapshot reports 0.
         let provable_totals: Vec<u64> = snapshot
             .iter()
             .map(|c| match c {
                 MisbehaviorCounts::V1(v1) => v1.faulty_blocks_provable,
             })
             .collect();
-        assert_eq!(provable_totals, vec![5, 1, 0, 0]);
+        assert_eq!(provable_totals, vec![2, 0, 0, 0]);
     }
 
     #[tokio::test]
