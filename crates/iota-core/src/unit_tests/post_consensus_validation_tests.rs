@@ -423,8 +423,8 @@ async fn test_stale_version_dropped_fresh_kept() {
     let epoch_store = authority.epoch_store_for_testing();
     let rgp = authority.reference_gas_price_for_testing().unwrap();
 
-    let gas_stale = authority.get_object(&gas_stale_id).await.unwrap();
-    let gas_fresh = authority.get_object(&gas_fresh_id).await.unwrap();
+    let gas_stale = authority.get_object(&gas_stale_id).unwrap();
+    let gas_fresh = authority.get_object(&gas_fresh_id).unwrap();
 
     let fresh_ref = object.object_ref();
     // Stale reference: same object id and digest, but the previous version.

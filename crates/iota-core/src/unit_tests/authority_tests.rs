@@ -7145,7 +7145,7 @@ async fn test_pcool_deferred_tx_not_dropped_next_round_but_executed() {
         .await;
     let mut genesis_objects = gas_objects.clone();
     genesis_objects.extend(shared_objects.clone());
-    authority.insert_genesis_objects(&genesis_objects).await;
+    authority.insert_genesis_objects(&genesis_objects);
 
     // Build two `UserTransactionV1` transactions touching the same shared object,
     // each paid by a distinct gas coin. The move call is never executed (the
@@ -7274,9 +7274,7 @@ async fn test_consensus_queue_graduated_load_shedding() {
     let soft_limit = hard_limit * soft_limit_pct as usize / 100;
 
     let authority_state = TestAuthorityBuilder::new().build().await;
-    authority_state
-        .insert_genesis_objects(&[gas_object1.clone(), gas_object2.clone()])
-        .await;
+    authority_state.insert_genesis_objects(&[gas_object1.clone(), gas_object2.clone()]);
 
     let consensus_adapter = Arc::new(ConsensusAdapter::new(
         Arc::new(MockConsensusClient::new()),
