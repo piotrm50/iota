@@ -1122,7 +1122,6 @@ fun process_validator_departure(
     };
 
     if (is_committee) {
-        self.total_stake = self.total_stake - validator.total_stake_amount();
         event::emit(CommitteeValidatorLeaveEvent {
             epoch: new_epoch,
             validator_address,
