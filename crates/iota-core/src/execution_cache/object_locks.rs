@@ -81,23 +81,21 @@ impl ObjectLocks {
         // Solving this is not terribly important as it is not in the execution path,
         // and hence only improves the latency of transaction signing, not
         // transaction execution
-        let prev_lock = match entry {
-            DashMapEntry::Vacant(vacant) => {
+        // Determine the currently effective lock without mutating the cache yet.
+        // The refcount must only be incremented (or a new entry inserted) on the
+        // success path; doing it before the conflict check below would leak cache
+        // entries and inflate refcounts on every lock conflict.
+        let prev_lock = match &entry {
+            DashMapEntry::Vacant(_) => {
                 let tables = epoch_store.tables()?;
                 if let Some(lock_details) = tables.get_locked_transaction(obj_ref)? {
                     trace!("read lock from db: {:?}", lock_details);
-                    vacant.insert((1, lock_details));
                     lock_details
                 } else {
-                    trace!("set lock: {:?}", new_lock);
-                    vacant.insert((1, new_lock));
                     new_lock
                 }
             }
-            DashMapEntry::Occupied(mut occupied) => {
-                occupied.get_mut().0 += 1;
-                occupied.get().1
-            }
+            DashMapEntry::Occupied(occupied) => occupied.get().1,
         };
 
         if prev_lock != new_lock {
@@ -105,13 +103,25 @@ impl ObjectLocks {
                 "lock conflict detected for {:?}: {:?} != {:?}",
                 obj_ref, prev_lock, new_lock
             );
-            Err(IotaError::ObjectLockConflict {
+            return Err(IotaError::ObjectLockConflict {
                 obj_ref: *obj_ref,
                 pending_transaction: prev_lock,
-            })
-        } else {
-            Ok(())
+            });
         }
+
+        // No conflict: take the lock by inserting a fresh entry or bumping the
+        // existing refcount.
+        match entry {
+            DashMapEntry::Vacant(vacant) => {
+                trace!("set lock: {:?}", new_lock);
+                vacant.insert((1, new_lock));
+            }
+            DashMapEntry::Occupied(mut occupied) => {
+                occupied.get_mut().0 += 1;
+            }
+        }
+
+        Ok(())
     }
 
     pub(crate) fn clear(&self) {
