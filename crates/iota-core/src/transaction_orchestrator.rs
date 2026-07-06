@@ -204,7 +204,8 @@ where
             parent_path.join("fullnode_pending_transactions"),
         ));
 
-        // Start pending transaction log cleanup only if QuorumDriver is used
+        // Recover any transactions left in the pending-tx log by a crash and,
+        // for QuorumDriver, keep the log pruned as effects arrive.
         let _local_executor_handle =
             if let (Some(handler), Some(receiver)) = (&quorum_driver_handler, effects_receiver) {
                 let pending_tx_log_clone = pending_tx_log.clone();
@@ -212,14 +213,17 @@ where
                     Self::loop_pending_transaction_log(receiver, pending_tx_log_clone).await;
                 }));
 
-                // Schedule pending transaction recovery (QuorumDriver mode only;
-                // TransactionDriver does not track pending certificates)
                 Self::schedule_txes_in_log(pending_tx_log.clone(), handler.clone());
 
                 res
             } else {
-                // TransactionDriver mode: no pending tx log cleanup needed
-                // (transactions go directly to consensus, no certificate tracking)
+                // TransactionDriver mode: each submission wraps itself in a
+                // guard that prunes the WAL entry on completion, so there is no
+                // effects-driven cleanup loop. Still re-drive any transactions
+                // left behind by a crash.
+                if let Some(td) = &transaction_driver {
+                    Self::schedule_txes_in_log_td(pending_tx_log.clone(), td.clone());
+                }
                 None
             };
 
@@ -625,17 +629,87 @@ where
     ) -> Result<ExecuteTransactionResponseV1, TransactionDriverError> {
         let tx_digest = *request.transaction.digest();
 
-        // TODO: add transaction to some struct to prevent sending the same transaction
-        // multiple times in case client sends it multiple times if self
-        //     .pending_tx_log
-        //     .write_pending_transaction_maybe(&transaction)
-        //     .await
-        //     .map_err(|e| QuorumDriverError::QuorumDriverInternal(e))?
-        // {
-        //     debug!(?tx_digest, "no pending request in flight, submitting to
-        // TransactionDriver."); } else {
-        //     debug!(?tx_digest, "transaction already in flight, skipping duplicate
-        // submission."); }
+        // Record the transaction in the WAL for the duration of this
+        // submission. The guard reports whether this is the first in-flight
+        // submission for the digest and prunes the WAL entry on drop (success,
+        // error, timeout, or cancellation) so it does not leak. The callers
+        // have already verified the transaction, so re-wrapping without
+        // re-verifying is sound.
+        let verified_transaction = VerifiedTransaction::new_unchecked(request.transaction.clone());
+        let guard =
+            TransactionSubmissionGuard::new(self.pending_tx_log.clone(), &verified_transaction)
+                .await
+                .map_err(|e| TransactionDriverError::ClientInternal {
+                    error: e.to_string(),
+                })?;
+
+        if !guard.is_new_transaction() {
+            // Another caller is already driving this transaction. Wait for the
+            // effects to land locally and serve them instead of resubmitting.
+            debug!(
+                ?tx_digest,
+                "transaction already in flight, waiting for local effects instead of resubmitting"
+            );
+            let epoch_store = self.validator_state.load_epoch_store_one_call_per_task();
+            let cache_reader = self.validator_state.get_transaction_cache_reader().clone();
+            let digests = [tx_digest];
+            let awaited_effects = match timeout(
+                WAIT_FOR_FINALITY_TIMEOUT,
+                epoch_store
+                    .within_alive_epoch(cache_reader.try_notify_read_executed_effects(&digests)),
+            )
+            .await
+            {
+                Ok(Ok(Ok(mut effects))) => {
+                    effects.pop().expect("one effects entry per requested digest")
+                }
+                Ok(Ok(Err(err))) => {
+                    return Err(TransactionDriverError::ClientInternal {
+                        error: err.to_string(),
+                    });
+                }
+                // Epoch ended before the effects were observed, or the wait
+                // timed out; both are retriable by resubmitting.
+                Ok(Err(())) | Err(_) => {
+                    return Err(TransactionDriverError::TimeoutWithLastRetriableError {
+                        last_error: None,
+                        attempts: 0,
+                        timeout: WAIT_FOR_FINALITY_TIMEOUT,
+                    });
+                }
+            };
+
+            let cached = read_cached_transaction_data(
+                &self.validator_state,
+                &tx_digest,
+                request.include_events,
+                request.include_input_objects,
+                request.include_output_objects,
+            )
+            .map_err(|e| TransactionDriverError::ClientInternal {
+                error: e.to_string(),
+            })?;
+            let (effects, events, input_objects, output_objects) = match cached {
+                Some(c) => (c.effects, c.events, c.input_objects, c.output_objects),
+                None => (awaited_effects, None, None, None),
+            };
+            let epoch = effects.epoch();
+            return Ok(ExecuteTransactionResponseV1 {
+                effects: FinalizedEffects {
+                    effects,
+                    finality_info: EffectsFinalityInfo::QuorumExecuted(epoch),
+                },
+                events,
+                input_objects,
+                output_objects,
+                auxiliary_data: None,
+            });
+        }
+
+        debug!(
+            ?tx_digest,
+            "no pending request in flight, submitting to TransactionDriver"
+        );
 
         let td_response = td
             .drive_transaction(
@@ -1018,6 +1092,56 @@ where
         });
     }
 
+    fn schedule_txes_in_log_td(
+        pending_tx_log: Arc<WritePathPendingTransactionLog>,
+        transaction_driver: Arc<TransactionDriver<A>>,
+    ) {
+        spawn_logged_monitored_task!(async move {
+            if std::env::var("SKIP_LOADING_FROM_PENDING_TX_LOG").is_ok() {
+                info!("Skipping loading pending transactions from pending_tx_log.");
+                return;
+            }
+            let pending_txes = pending_tx_log
+                .load_all_pending_transactions()
+                .expect("failed to load all pending transactions");
+            info!(
+                "Recovering {} pending transactions from pending_tx_log.",
+                pending_txes.len()
+            );
+            for tx in pending_txes {
+                let tx = tx.into_inner();
+                let tx_digest = *tx.digest();
+                let pending_tx_log = pending_tx_log.clone();
+                let transaction_driver = transaction_driver.clone();
+                spawn_monitored_task!(async move {
+                    if let Err(err) = transaction_driver
+                        .drive_transaction(
+                            Some(tx),
+                            SubmitTransactionOptions::default(),
+                            Some(WAIT_FOR_FINALITY_TIMEOUT),
+                            false,
+                        )
+                        .await
+                    {
+                        warn!(
+                            ?tx_digest,
+                            "Failed to drive recovered transaction from pending_tx_log: {err:?}"
+                        );
+                    }
+                    // Prune the recovered transaction whether or not driving
+                    // succeeded; a persistent failure should not keep it in the
+                    // log forever, and the client can resubmit.
+                    if let Err(err) = pending_tx_log.finish_transaction(&tx_digest) {
+                        warn!(
+                            ?tx_digest,
+                            "Failed to finish recovered transaction in pending_tx_log: {err}"
+                        );
+                    }
+                });
+            }
+        });
+    }
+
     pub fn load_all_pending_transactions(&self) -> IotaResult<Vec<VerifiedTransaction>> {
         self.pending_tx_log.load_all_pending_transactions()
     }
@@ -1137,6 +1261,48 @@ fn count_validator_attempts(errors: &AggregatedRequestErrors) -> u32 {
         .iter()
         .map(|(_, authorities, _, _)| authorities.len() as u32)
         .sum()
+}
+
+/// Records a transaction in the pending-tx log while it is being driven and
+/// removes it on drop. `new` reports whether this is the first in-flight
+/// submission for the digest, so concurrent callers can avoid resubmitting.
+/// Dropping the guard — on success, error, timeout, or task cancellation —
+/// prunes the WAL entry so it does not leak, and re-driving on restart is
+/// handled by `schedule_txes_in_log_td`.
+struct TransactionSubmissionGuard {
+    pending_tx_log: Arc<WritePathPendingTransactionLog>,
+    tx_digest: TransactionDigest,
+    is_new_transaction: bool,
+}
+
+impl TransactionSubmissionGuard {
+    async fn new(
+        pending_tx_log: Arc<WritePathPendingTransactionLog>,
+        tx: &VerifiedTransaction,
+    ) -> IotaResult<Self> {
+        let tx_digest = *tx.digest();
+        let is_new_transaction = pending_tx_log.write_pending_transaction_maybe(tx).await?;
+        Ok(Self {
+            pending_tx_log,
+            tx_digest,
+            is_new_transaction,
+        })
+    }
+
+    fn is_new_transaction(&self) -> bool {
+        self.is_new_transaction
+    }
+}
+
+impl Drop for TransactionSubmissionGuard {
+    fn drop(&mut self) {
+        if let Err(err) = self.pending_tx_log.finish_transaction(&self.tx_digest) {
+            warn!(
+                tx_digest = ?self.tx_digest,
+                "Failed to clean up transaction in pending_tx_log: {err}"
+            );
+        }
+    }
 }
 
 /// Prometheus metrics which can be displayed in Grafana, queried and alerted on
