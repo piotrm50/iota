@@ -15,7 +15,7 @@ use iota_types::{
     committee::StakeUnit,
     digests::{TransactionDigest, TransactionEffectsDigest},
     effects::{TransactionEffectsAPI as _, TransactionEffectsExt as _},
-    error::{IotaError, IotaResult},
+    error::{ErrorCategory, IotaError, IotaResult},
     messages_grpc::{ExecutedData, GetTxStatusRequest, TxStatusQuery, TxStatusUpdate},
     object::Object,
     transaction_driver_types::{EffectsFinalityInfo, FinalizedEffects},
@@ -717,9 +717,12 @@ impl EffectsCertifier {
         // transaction submissions.
         let mut retriable_errors_aggregator =
             StatusAggregator::<TransactionRequestError>::new(committee.clone());
-        // Collect responses from validators which observed the transaction getting
-        // rejected, but do not have a local reason to reject the transaction.
-        let reason_not_found_aggregator = StatusAggregator::<()>::new(committee.clone());
+        // Collect responses from validators which rejected the transaction
+        // without a reason attributable to the transaction itself: the drop
+        // carried only a generic, retriable reason with no useful error message
+        // (e.g. an unspecified transient failure). These keep the transaction
+        // retriable but are not surfaced as reportable rejection errors.
+        let mut reason_not_found_aggregator = StatusAggregator::<()>::new(committee.clone());
         // Every validator returns at most one TxStatusUpdate.
         while let Some((name, response)) = futures.next().await {
             // Extract the first per-item result from the batch response.
@@ -763,12 +766,21 @@ impl EffectsCertifier {
                     }
                 }
                 Ok(Some((_, TxStatusUpdate::Rejected { error }))) => {
-                    tracing::trace!(name = ?name.concise(), "Rejected at validator: {:?}", error);
                     let error = TransactionRequestError::RejectedAtValidator(error);
-                    if error.is_submission_retriable() {
-                        retriable_errors_aggregator.insert(name, error);
+                    if error.categorize() == ErrorCategory::Aborted {
+                        // A generic, retriable drop with no reason attributable
+                        // to the transaction itself. Count the responded stake
+                        // (keeping the transaction retriable) without treating
+                        // it as a reportable rejection error.
+                        tracing::trace!(name = ?name.concise(), "Rejected without a local reason at validator: {:?}", error);
+                        reason_not_found_aggregator.insert(name, ());
                     } else {
-                        non_retriable_errors_aggregator.insert(name, error);
+                        tracing::trace!(name = ?name.concise(), "Rejected at validator: {:?}", error);
+                        if error.is_submission_retriable() {
+                            retriable_errors_aggregator.insert(name, error);
+                        } else {
+                            non_retriable_errors_aggregator.insert(name, error);
+                        }
                     }
                     self.metrics.rejection_acks.inc();
                 }
@@ -1261,6 +1273,59 @@ mod tests {
             matches!(err, TransactionDriverError::RejectedByValidators { .. }),
             "expected RejectedByValidators, got {err:?}"
         );
+    }
+
+    /// A generic rejection with no reason attributable to the transaction is
+    /// routed into the reason-not-found bucket: the transaction stays retriable
+    /// (an `Aborted` driver error) but the reasonless drops are not surfaced as
+    /// reportable rejection errors.
+    #[tokio::test]
+    async fn reasonless_rejections_stay_retriable_without_being_reported() {
+        let agg = make_aggregator(4);
+        let metrics = Arc::new(TransactionDriverMetrics::new_for_tests());
+        let certifier = EffectsCertifier::new(metrics.clone());
+        let monitor = ValidatorClientMonitor::new_for_test();
+        let digest = TransactionDigest::random();
+
+        let names: Vec<_> = agg.committee.names().copied().collect();
+        for name in &names {
+            set_validator_status(
+                &agg,
+                name,
+                digest,
+                TxStatusUpdate::Rejected {
+                    error: IotaError::GenericAuthority {
+                        error: "dropped without a transaction-specific reason".to_string(),
+                    },
+                },
+            );
+        }
+
+        let err = certifier
+            .get_certified_finalized_effects(
+                &agg,
+                &monitor,
+                Some(digest),
+                names[0],
+                TxStatusUpdate::Submitted,
+                &options(),
+            )
+            .await
+            .expect_err("no effects can be certified when every validator rejects");
+        match err {
+            TransactionDriverError::Aborted {
+                submission_retriable_errors,
+                submission_non_retriable_errors,
+                ..
+            } => {
+                assert_eq!(
+                    submission_retriable_errors.total_stake, 0,
+                    "reasonless rejections must not be reported as retriable errors"
+                );
+                assert_eq!(submission_non_retriable_errors.total_stake, 0);
+            }
+            e => panic!("expected Aborted, got {e:?}"),
+        }
     }
 
     #[tokio::test]
