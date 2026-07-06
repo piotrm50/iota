@@ -225,6 +225,29 @@ impl PeerHeights {
         true
     }
 
+    /// Updates the peer's height without storing any checkpoint data.
+    ///
+    /// Returns false if the peer doesn't have an entry or is not on the same
+    /// chain as us.
+    pub fn update_peer_height(
+        &mut self,
+        peer_id: PeerId,
+        height: CheckpointSequenceNumber,
+        low_watermark: Option<CheckpointSequenceNumber>,
+    ) -> bool {
+        let info = match self.peers.get_mut(&peer_id) {
+            Some(info) if info.on_same_chain_as_us => info,
+            _ => return false,
+        };
+
+        info.height = std::cmp::max(height, info.height);
+        if let Some(low_watermark) = low_watermark {
+            info.lowest = low_watermark;
+        }
+
+        true
+    }
+
     #[instrument(level = "debug", skip_all, fields(peer_id=?peer_id, lowest = ?info.lowest, height = ?info.height))]
     pub fn insert_peer_info(&mut self, peer_id: PeerId, info: PeerStateSyncInfo) {
         use std::collections::hash_map::Entry;

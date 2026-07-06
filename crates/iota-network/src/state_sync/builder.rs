@@ -162,6 +162,7 @@ where
             peer_heights: peer_heights.clone(),
             sender: weak_sender,
             genesis_checkpoint: genesis_checkpoint.clone(),
+            max_checkpoint_lookahead: config.max_checkpoint_lookahead(),
         };
 
         (

@@ -55,6 +55,9 @@ pub(super) struct Server<S> {
     pub(super) sender: mpsc::WeakSender<StateSyncMessage>,
     /// Cached genesis checkpoint, shared with the event loop.
     pub(super) genesis_checkpoint: Arc<VerifiedCheckpoint>,
+    /// Maximum distance ahead of our highest verified checkpoint for which we
+    /// buffer unverified pushed summaries.
+    pub(super) max_checkpoint_lookahead: u64,
 }
 
 #[anemo::async_trait]
@@ -75,14 +78,7 @@ where
             .ok_or_else(|| Status::internal("unable to query sender's PeerId"))?;
 
         let checkpoint = request.into_inner();
-        if !self
-            .peer_heights
-            .write()
-            .unwrap()
-            .update_peer_info(peer_id, checkpoint.clone(), None)
-        {
-            return Ok(Response::new(()));
-        }
+        let checkpoint_seq = *checkpoint.sequence_number();
 
         let highest_verified_checkpoint = *self
             .store
@@ -90,9 +86,37 @@ where
             .map_err(|e| Status::internal(e.to_string()))?
             .sequence_number();
 
+        {
+            let mut peer_heights = self.peer_heights.write().unwrap();
+
+            // Always update the peer's height so we know what they claim to have,
+            // even if we don't store the checkpoint itself.
+            if !peer_heights.update_peer_height(peer_id, checkpoint_seq, None) {
+                return Ok(Response::new(()));
+            }
+
+            // Only buffer the summary when it is within the lookahead bound. An
+            // unverified summary far ahead of our highest verified checkpoint
+            // could otherwise force unbounded growth of the unprocessed-checkpoint
+            // map.
+            if checkpoint_seq
+                <= highest_verified_checkpoint.saturating_add(self.max_checkpoint_lookahead)
+            {
+                peer_heights.insert_checkpoint(checkpoint);
+            } else {
+                tracing::debug!(
+                    ?peer_id,
+                    checkpoint_seq,
+                    highest_verified_checkpoint,
+                    max_lookahead = self.max_checkpoint_lookahead,
+                    "not storing checkpoint summary that exceeds max lookahead"
+                );
+            }
+        }
+
         // If this checkpoint is higher than our highest verified checkpoint notify the
         // event loop to potentially sync it
-        if *checkpoint.sequence_number() > highest_verified_checkpoint {
+        if checkpoint_seq > highest_verified_checkpoint {
             if let Some(sender) = self.sender.upgrade() {
                 sender.send(StateSyncMessage::StartSyncJob).await.unwrap();
             }

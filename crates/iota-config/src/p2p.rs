@@ -197,6 +197,15 @@ pub struct StateSyncConfig {
     /// content from. If unspecified, this will set to default value
     #[serde(skip_serializing_if = "Option::is_none")]
     pub wait_interval_when_no_peer_to_sync_content_ms: Option<u64>,
+
+    /// Maximum lookahead (in checkpoint sequence numbers) for storing unverified
+    /// checkpoint summaries received via PushCheckpointSummary. Summaries beyond
+    /// this distance from our highest verified checkpoint are dropped rather than
+    /// buffered.
+    ///
+    /// If unspecified, this will default to `1,000`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_checkpoint_lookahead: Option<u64>,
 }
 
 impl StateSyncConfig {
@@ -231,6 +240,13 @@ impl StateSyncConfig {
 
         self.checkpoint_content_download_concurrency
             .unwrap_or(CHECKPOINT_CONTENT_DOWNLOAD_CONCURRENCY)
+    }
+
+    pub fn max_checkpoint_lookahead(&self) -> u64 {
+        const DEFAULT_MAX_CHECKPOINT_LOOKAHEAD: u64 = 1_000;
+
+        self.max_checkpoint_lookahead
+            .unwrap_or(DEFAULT_MAX_CHECKPOINT_LOOKAHEAD)
     }
 
     pub fn checkpoint_content_download_tx_concurrency(&self) -> u64 {
