@@ -45,7 +45,7 @@ use tokio::{
         Duration, {self},
     },
 };
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 
 use crate::{
     authority::authority_per_epoch_store::AuthorityPerEpochStore,
@@ -887,7 +887,7 @@ impl ConsensusAdapter {
                                 .inc();
                             // Block has been sequenced. Nothing more to do, we do have guarantees
                             // that the transaction will appear in consensus output.
-                            trace!(
+                            debug!(
                                 "Transaction {transaction_keys:?} has been sequenced by consensus."
                             );
                             break;
@@ -930,7 +930,10 @@ impl ConsensusAdapter {
                 }
             };
         }
-        debug!("{transaction_keys:?} processed by consensus");
+        debug!(
+            "{transaction_keys:?} processed via {}",
+            guard.processed_method.processed_via()
+        );
 
         let consensus_keys: Vec<_> = transactions.iter().map(|t| t.key()).collect();
         epoch_store
@@ -1387,6 +1390,28 @@ enum ProcessedMethod {
     Dropped,
 }
 
+impl ProcessedMethod {
+    /// Human-readable description of how a transaction left the adapter, for
+    /// logging.
+    fn processed_via(self) -> &'static str {
+        match self {
+            ProcessedMethod::Consensus => "consensus output",
+            ProcessedMethod::Checkpoint => "checkpoint execution",
+            ProcessedMethod::Dropped => "dropped",
+        }
+    }
+
+    /// `processed_method` label value for the `sequencing_certificate_latency`
+    /// metric. Kept stable so existing dashboards and alerts continue to match.
+    fn latency_metric_label(self) -> &'static str {
+        match self {
+            ProcessedMethod::Consensus => "processed_via_consensus",
+            ProcessedMethod::Checkpoint => "processed_via_checkpoint",
+            ProcessedMethod::Dropped => "dropped",
+        }
+    }
+}
+
 impl<'a> InflightDropGuard<'a> {
     pub fn acquire(adapter: &'a ConsensusAdapter, tx_type: &'static str) -> Self {
         adapter
@@ -1450,15 +1475,14 @@ impl Drop for InflightDropGuard<'_> {
         };
 
         let latency = self.start.elapsed();
-        let processed_method = match self.processed_method {
-            ProcessedMethod::Consensus => "processed_via_consensus",
-            ProcessedMethod::Checkpoint => "processed_via_checkpoint",
-            ProcessedMethod::Dropped => "dropped",
-        };
         self.adapter
             .metrics
             .sequencing_certificate_latency
-            .with_label_values(&[position.as_str(), self.tx_type, processed_method])
+            .with_label_values(&[
+                position.as_str(),
+                self.tx_type,
+                self.processed_method.latency_metric_label(),
+            ])
             .observe(latency.as_secs_f64());
 
         // Only sample latency after consensus quorum is up. Otherwise, the wait for
