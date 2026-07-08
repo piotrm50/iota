@@ -68,10 +68,7 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         let context = self.context.clone();
         let network_client = self.network_client.clone();
         let authority_service = self.authority_service.clone();
-        let last_received = {
-            let dag_state = self.dag_state.read();
-            dag_state.get_last_block_header_for_authority(peer).round()
-        };
+        let dag_state = self.dag_state.clone();
 
         let mut subscriptions = self.subscriptions.lock();
         self.unsubscribe_locked(peer, &mut subscriptions[peer.value()]);
@@ -79,8 +76,8 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
             context,
             network_client,
             authority_service,
+            dag_state,
             peer,
-            last_received,
         )));
     }
 
@@ -119,8 +116,8 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
         context: Arc<Context>,
         network_client: Arc<C>,
         authority_service: Arc<S>,
+        dag_state: Arc<RwLock<DagState>>,
         peer: AuthorityIndex,
-        last_received: Round,
     ) {
         const IMMEDIATE_RETRIES: i64 = 3;
         // When not immediately retrying, limit retry delay between 100ms and 10s.
@@ -161,6 +158,14 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                 delay = INITIAL_RETRY_INTERVAL;
             }
             retries += 1;
+
+            // Recompute the resume round before each connection attempt, so a
+            // reconnection resumes from the latest accepted round instead of
+            // re-streaming blocks accepted since the subscription started.
+            let last_received: Round = dag_state
+                .read()
+                .get_last_block_header_for_authority(peer)
+                .round();
 
             // Wrap subscribe_block_bundles in a timeout and increment metric on timeout
             let subscribe_future =
@@ -246,8 +251,11 @@ impl<C: NetworkClient, S: NetworkService> Subscriber<C, S> {
                                 }
                             }
                         }
-                        // Reset retries when a block is received.
+                        // Reset the retry counter and backoff delay when a block is
+                        // received, so a peer that recovers after flapping reconnects
+                        // promptly instead of inheriting the escalated delay.
                         retries = 0;
+                        delay = INITIAL_RETRY_INTERVAL;
                     }
                     None => {
                         debug!(
@@ -271,19 +279,29 @@ mod test {
 
     use super::*;
     use crate::{
-        block_header::BlockRef,
+        block_header::{BlockRef, TestBlockHeader, VerifiedBlockHeader},
         commit::CommitRange,
+        dag_state::DataSource,
         error::ConsensusResult,
         network::{BlockBundleStream, SerializedBlockBundle, test_network::TestService},
         storage::mem_store::MemStore,
         transaction_ref::GenericTransactionRef,
     };
 
-    struct SubscriberTestClient {}
+    struct SubscriberTestClient {
+        // Records the `last_received` round passed to each subscribe_block_bundles() call.
+        subscribe_calls: Mutex<Vec<Round>>,
+    }
 
     impl SubscriberTestClient {
         fn new() -> Self {
-            Self {}
+            Self {
+                subscribe_calls: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn subscribe_calls(&self) -> Vec<Round> {
+            self.subscribe_calls.lock().clone()
         }
     }
 
@@ -292,9 +310,10 @@ mod test {
         async fn subscribe_block_bundles(
             &self,
             _peer: AuthorityIndex,
-            _last_received: Round,
+            last_received: Round,
             _timeout: Duration,
         ) -> ConsensusResult<BlockBundleStream> {
+            self.subscribe_calls.lock().push(last_received);
             let block_stream = stream::unfold((), |_| async {
                 sleep(Duration::from_millis(1)).await;
                 let block = SerializedBlockBundle {
@@ -394,5 +413,64 @@ mod test {
                 }
             );
         }
+    }
+
+    // Regression test: `last_received` must be recomputed from DagState before
+    // each connection attempt. Previously it was captured once at subscribe()
+    // time and reused for every reconnect, causing already-accepted blocks to
+    // be re-streamed and re-verified.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn subscriber_recomputes_resume_round_on_reconnect() {
+        telemetry_subscribers::init_for_testing();
+        let (context, _keys) = Context::new_for_test(4);
+        let context = Arc::new(context);
+        let authority_service = Arc::new(Mutex::new(TestService::new()));
+        let network_client = Arc::new(SubscriberTestClient::new());
+        let store = Arc::new(MemStore::new());
+        let dag_state = Arc::new(RwLock::new(DagState::new(context.clone(), store)));
+        let subscriber = Subscriber::new(
+            context.clone(),
+            network_client.clone(),
+            authority_service,
+            dag_state.clone(),
+        );
+
+        let peer = context.committee.to_authority_index(2).unwrap();
+        subscriber.subscribe(peer);
+
+        // Before any block header from the peer is accepted, every reconnect
+        // resumes from the genesis round.
+        sleep(Duration::from_secs(3)).await;
+        let recorded = network_client.subscribe_calls();
+        assert!(
+            !recorded.is_empty() && recorded.iter().all(|&round| round == 0),
+            "before a block is accepted, every reconnect should resume from round 0: {recorded:?}"
+        );
+
+        // Advance the locally accepted round for the peer.
+        const RESUME_ROUND: Round = 10;
+        dag_state.write().accept_block_header(
+            VerifiedBlockHeader::new_for_test(
+                TestBlockHeader::new(RESUME_ROUND, peer.value() as u8).build(),
+            ),
+            DataSource::Test,
+        );
+
+        // After the block header is accepted, reconnects must resume from the
+        // advanced round.
+        let mut observed_resume = false;
+        for _ in 0..10 {
+            sleep(Duration::from_secs(1)).await;
+            if network_client.subscribe_calls().last() == Some(&RESUME_ROUND) {
+                observed_resume = true;
+                break;
+            }
+        }
+        assert!(
+            observed_resume,
+            "after accepting a block header at round {RESUME_ROUND}, the subscriber should \
+             resume from it; recorded resume rounds: {:?}",
+            network_client.subscribe_calls()
+        );
     }
 }
