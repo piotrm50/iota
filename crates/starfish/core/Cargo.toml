@@ -64,7 +64,7 @@ typed-store.workspace = true
 # external dependencies
 rstest.workspace = true
 serial_test.workspace = true
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
 
 # internal dependencies
 telemetry-subscribers.workspace = true

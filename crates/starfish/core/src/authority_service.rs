@@ -930,6 +930,12 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
     ) -> ConsensusResult<BlockBundleStream> {
         fail_point_async!("consensus-rpc-response");
 
+        // Subscribe to the broadcast channel before snapshotting missed blocks below.
+        // A block can then show up in both the snapshot and the subscription stream,
+        // which the receiving side tolerates; subscribing after the snapshot could
+        // miss a block broadcast in between entirely.
+        let rx_block_broadcaster = self.rx_block_broadcaster.resubscribe();
+
         let dag_state = self.dag_state.read();
         // Find recent own blocks that have not been received by the peer.
         // If last_received is a valid and more blocks have been proposed since then,
@@ -950,7 +956,7 @@ impl<C: CoreThreadDispatcher> NetworkService for AuthorityService<C> {
 
         let broadcasted_blocks = BroadcastedBlockStream::new(
             peer,
-            self.rx_block_broadcaster.resubscribe(),
+            rx_block_broadcaster,
             self.subscription_counter.clone(),
         );
         let context = self.context.clone();
@@ -2837,7 +2843,7 @@ mod tests {
         assert_eq!(received, None);
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_handle_subscribe_block_bundles_request() {
         telemetry_subscribers::init_for_testing();
         // GIVEN
@@ -3162,6 +3168,51 @@ mod tests {
                 verified_block.round(),
             );
         }
+
+        // A block broadcast while the handler is about to snapshot missed blocks
+        // from DagState must not be lost: the handler has to subscribe to the
+        // broadcast channel before taking the snapshot. Hold the DagState write
+        // lock so a new request blocks right before the snapshot, broadcast a
+        // block in that window, and verify the stream still delivers it.
+        let write_guard = dag_state.write();
+        let service = authority_service.clone();
+        let request_handle = tokio::spawn(async move {
+            service
+                .handle_subscribe_block_bundles_request(to_whom_authority, rounds)
+                .await
+        });
+        // Let the request handler reach the DagState read and block on it. The
+        // write guard must not be held across an await, so block the test
+        // thread instead; the handler task runs on another worker thread.
+        std::thread::sleep(Duration::from_millis(500));
+        tx_block_broadcast
+            .send(all_blocks[rounds as usize][0].clone())
+            .expect("We expect that block is sent successfully");
+        drop(write_guard);
+
+        let mut stream = request_handle
+            .await
+            .expect("Request handler should not panic")
+            .expect("Should return a valid stream");
+        let bundle = tokio::time::timeout(Duration::from_secs(5), stream.next())
+            .await
+            .expect("The block broadcast before the snapshot should arrive within the timeout")
+            .expect("Stream should yield the block broadcast before the snapshot");
+        let serialized_block_bundle_parts = SerializedBlockBundleParts::try_from(bundle).unwrap();
+        let SerializedHeaderAndTransactions {
+            serialized_block_header,
+            serialized_transactions: _,
+        } = SerializedHeaderAndTransactions::try_from(SerializedBlock {
+            serialized_block: serialized_block_bundle_parts.serialized_block,
+        })
+        .unwrap();
+        let signed_block_header: SignedBlockHeader =
+            bcs::from_bytes(&serialized_block_header).unwrap();
+        assert_eq!(
+            signed_block_header.round(),
+            rounds,
+            "The block broadcast before the snapshot should be delivered through the live stream"
+        );
     }
 
     #[tokio::test]
