@@ -1164,6 +1164,117 @@ mod tests {
         }
     }
 
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn test_user_transaction_ignored_at_epoch_close_notifies_dropped() {
+        // GIVEN a P-COOL user transaction sequenced after consensus certs are
+        // no longer accepted.
+        let _guard = ProtocolConfig::apply_overrides_for_testing(|_, mut config| {
+            config.set_enable_pcool_flow_for_testing(true);
+            config
+        });
+
+        let (sender, sender_key): (_, AccountKeyPair) = get_key_pair();
+        let owned_object = Object::with_id_owner_for_testing(ObjectId::random(), sender);
+        let gas_object = Object::with_id_owner_for_testing(ObjectId::random(), sender);
+        let objects = vec![owned_object.clone(), gas_object.clone()];
+
+        let network_config =
+            iota_swarm_config::network_config_builder::ConfigBuilder::new_with_temp_dir()
+                .with_objects(objects.clone())
+                .build();
+
+        let state = TestAuthorityBuilder::new()
+            .with_network_config(&network_config, 0)
+            .build()
+            .await;
+
+        let epoch_store = state.epoch_store_for_testing().clone();
+        let new_epoch_start_state = epoch_store.epoch_start_state();
+        let consensus_committee = new_epoch_start_state.get_consensus_committee();
+        let rgp = epoch_store.reference_gas_price();
+
+        let metrics = Arc::new(AuthorityMetrics::new(&Registry::new()));
+        let backpressure_manager = BackpressureManager::new_for_tests();
+
+        let mut consensus_handler = ConsensusHandler::new(
+            epoch_store.clone(),
+            state.clone(),
+            Arc::new(CheckpointServiceNoop {}),
+            state.transaction_manager().clone(),
+            state.get_object_cache_reader().clone(),
+            state.get_transaction_cache_reader().clone(),
+            Arc::new(ArcSwap::default()),
+            consensus_committee.clone(),
+            metrics,
+            backpressure_manager.subscribe(),
+        );
+
+        let (recipient, _): (Address, AccountKeyPair) = get_key_pair();
+        let owned_ref = state.get_object(&owned_object.id()).unwrap().object_ref();
+        let gas_ref = state.get_object(&gas_object.id()).unwrap().object_ref();
+        let tx_data = TransactionData::new_transfer(
+            recipient,
+            owned_ref,
+            sender,
+            gas_ref,
+            rgp * TEST_ONLY_GAS_UNIT_FOR_TRANSFER,
+            rgp,
+        );
+        let tx = to_sender_signed_transaction(tx_data, &sender_key);
+        let verified_tx = epoch_store.verify_transaction(tx).unwrap();
+        let digest = *verified_tx.digest();
+
+        let consensus_tx = ConsensusTransaction {
+            kind: ConsensusTransactionKind::UserTransactionV1(Box::new(verified_tx.into())),
+            tracking_id: Default::default(),
+        };
+        let key = SequencedConsensusTransactionKey::External(consensus_tx.key());
+
+        let header = VerifiedBlockHeader::new_for_test(TestBlockHeader::new(100_u32, 0_u8).build());
+        let tx_batch = VerifiedTransactions::new_for_test(
+            &header,
+            vec![Transaction::new(bcs::to_bytes(&consensus_tx).unwrap())],
+        );
+        let committed_sub_dag = CommittedSubDag::new(
+            header.reference(),
+            vec![header.clone()],
+            vec![header.reference()],
+            vec![tx_batch],
+            header.timestamp_ms(),
+            CommitRef::new(10, CommitDigest::MIN),
+            vec![],
+            vec![],
+        );
+
+        // AND the epoch is closed to the point where consensus certs are no
+        // longer accepted.
+        epoch_store
+            .get_reconfig_state_write_lock_guard()
+            .close_all_certs();
+
+        // WHEN processing the consensus output
+        consensus_handler
+            .handle_consensus_output(committed_sub_dag)
+            .await;
+
+        // THEN the ignored transaction is reported as dropped, releasing the
+        // consensus adapter submission task and effects waiters...
+        let error = tokio::time::timeout(
+            Duration::from_secs(5),
+            epoch_store.notify_read_dropped_digests(digest),
+        )
+        .await
+        .expect("transaction ignored at epoch close should notify dropped-tx waiters");
+        assert!(matches!(
+            error,
+            iota_types::error::IotaError::ValidatorHaltedAtEpochEnd
+        ));
+
+        // ...without being recorded as consensus-message-processed, so it is
+        // reverted after restart during epoch change.
+        assert!(!epoch_store.is_consensus_message_processed(&key).unwrap());
+    }
+
     #[test]
     fn test_order_by_gas_price() {
         let chain = Chain::Unknown;

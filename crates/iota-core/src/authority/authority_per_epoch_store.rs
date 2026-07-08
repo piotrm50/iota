@@ -4569,6 +4569,18 @@ impl AuthorityPerEpochStore {
                         "Ignoring consensus certificate for transaction {:?} because of end of epoch",
                         transaction.digest()
                     );
+                    // This drop is deterministic: the reconfig state is derived from
+                    // prior commits and certs stay closed for the rest of the epoch,
+                    // so every occurrence of this digest is ignored on every
+                    // validator. Notify the dropped-tx cache so the consensus
+                    // adapter's submission task and effects waiters are released
+                    // instead of parking until epoch termination — they hold submit
+                    // semaphore permits that checkpoint signatures and EndOfPublish
+                    // need to close the epoch.
+                    self.dropped_tx_status_cache.insert_and_notify(&[(
+                        *transaction.digest(),
+                        IotaError::ValidatorHaltedAtEpochEnd,
+                    )]);
                     return Ok(ConsensusTransactionResult::Ignored);
                 }
 
@@ -4804,6 +4816,18 @@ impl AuthorityPerEpochStore {
                         "Ignoring P-COOL transaction {:?} because of end of epoch",
                         transaction.digest()
                     );
+                    // This drop is deterministic: the reconfig state is derived from
+                    // prior commits and certs stay closed for the rest of the epoch,
+                    // so every occurrence of this digest is ignored on every
+                    // validator. Notify the dropped-tx cache so the consensus
+                    // adapter's submission task and effects waiters are released
+                    // instead of parking until epoch termination — they hold submit
+                    // semaphore permits that checkpoint signatures and EndOfPublish
+                    // need to close the epoch.
+                    self.dropped_tx_status_cache.insert_and_notify(&[(
+                        *transaction.digest(),
+                        IotaError::ValidatorHaltedAtEpochEnd,
+                    )]);
                     return Ok(ConsensusTransactionResult::Ignored);
                 }
                 // TODO: verify that all the same validation actions are performed as for a
