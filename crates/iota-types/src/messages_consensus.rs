@@ -268,6 +268,21 @@ impl ConsensusTransactionKind {
     pub fn is_user_transaction(&self) -> bool {
         matches!(self, ConsensusTransactionKind::UserTransactionV1(_))
     }
+
+    /// Messages the node generates itself (checkpoint signatures,
+    /// end-of-publish, capability notifications, randomness DKG, misbehavior
+    /// reports, overload signaling) as opposed to user-submitted
+    /// transactions. These must reach consensus promptly to keep
+    /// checkpointing and epoch transitions moving, so the consensus adapter
+    /// lets them bypass the submit semaphore that user transactions contend
+    /// for.
+    pub fn is_system_message(&self) -> bool {
+        !matches!(
+            self,
+            ConsensusTransactionKind::CertifiedTransaction(_)
+                | ConsensusTransactionKind::UserTransactionV1(_)
+        )
+    }
 }
 
 /// A misbehavior report carrying a versioned payload plus a memoized digest.

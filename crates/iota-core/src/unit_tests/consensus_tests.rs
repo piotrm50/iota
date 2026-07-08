@@ -119,6 +119,22 @@ pub fn make_consensus_adapter_for_test(
     execute: bool,
     mock_block_status_receivers: Vec<BlockStatusReceiver>,
 ) -> Arc<ConsensusAdapter> {
+    make_consensus_adapter_for_test_with_submit_limit(
+        state,
+        process_via_checkpoint,
+        execute,
+        mock_block_status_receivers,
+        100_000,
+    )
+}
+
+pub fn make_consensus_adapter_for_test_with_submit_limit(
+    state: Arc<AuthorityState>,
+    process_via_checkpoint: HashSet<TransactionDigest>,
+    execute: bool,
+    mock_block_status_receivers: Vec<BlockStatusReceiver>,
+    max_pending_local_submissions: usize,
+) -> Arc<ConsensusAdapter> {
     let metrics = ConsensusAdapterMetrics::new_test();
 
     #[derive(Clone)]
@@ -219,7 +235,7 @@ pub fn make_consensus_adapter_for_test(
         state.name,
         Arc::new(ConnectionMonitorStatusForTests {}),
         100_000,
-        100_000,
+        max_pending_local_submissions,
         None,
         None,
         metrics,
@@ -326,6 +342,61 @@ async fn submit_multiple_transactions_to_consensus_adapter() {
         )
         .unwrap();
     waiter.await.unwrap();
+}
+
+#[sim_test]
+async fn system_message_bypasses_exhausted_submit_semaphore() {
+    telemetry_subscribers::init_for_testing();
+
+    let mut objects = test_gas_objects();
+    let shared_object = Object::shared_for_testing();
+    objects.push(shared_object.clone());
+    let state = init_state_with_objects(objects).await;
+    let certificate = test_certificates(&state, shared_object)
+        .await
+        .pop()
+        .unwrap();
+    let epoch_store = state.epoch_store_for_testing();
+
+    // Zero submit permits: any transaction that must acquire the submit
+    // semaphore blocks indefinitely. The single mock block status is reserved
+    // for the system message, the only submission expected to reach consensus.
+    let adapter = make_consensus_adapter_for_test_with_submit_limit(
+        state.clone(),
+        HashSet::new(),
+        false,
+        vec![with_block_status(BlockStatus::Sequenced(
+            starfish_core::GenericTransactionRef::BlockRef(BlockRef::MIN),
+        ))],
+        0,
+    );
+
+    // A certified user transaction contends for a permit, so it blocks.
+    let certificate_tx = ConsensusTransaction::new_certificate_message(&state.name, certificate);
+    let mut user_waiter = adapter
+        .submit(
+            certificate_tx,
+            Some(&epoch_store.get_reconfig_state_read_lock_guard()),
+            &epoch_store,
+        )
+        .unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_secs(2), &mut user_waiter)
+            .await
+            .is_err(),
+        "certified transaction must block on the exhausted submit semaphore"
+    );
+    // The submission is parked on the semaphore forever; abort it so it does not
+    // outlive the test.
+    user_waiter.abort();
+
+    // The system message bypasses the semaphore and completes.
+    let end_of_publish = ConsensusTransaction::new_end_of_publish(state.name);
+    let system_waiter = adapter.submit(end_of_publish, None, &epoch_store).unwrap();
+    tokio::time::timeout(Duration::from_secs(10), system_waiter)
+        .await
+        .expect("system message must not block on an exhausted submit semaphore")
+        .unwrap();
 }
 
 #[sim_test]

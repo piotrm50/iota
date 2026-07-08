@@ -773,6 +773,11 @@ impl ConsensusAdapter {
             "soft_bundle"
         };
 
+        // System messages are always submitted as single transactions (soft
+        // bundles are homogeneous user/certified batches), so inspecting the
+        // first kind is sufficient.
+        let is_system_message = !is_soft_bundle && transactions[0].kind.is_system_message();
+
         let mut guard = InflightDropGuard::acquire(&self, tx_type);
 
         // Create the waiter until the node's turn comes to submit to consensus
@@ -808,15 +813,7 @@ impl ConsensusAdapter {
         };
 
         // Log warnings for administrative transactions that fail to get sequenced
-        let _monitor = if !is_soft_bundle
-            && matches!(
-                transactions[0].kind,
-                ConsensusTransactionKind::EndOfPublish(_)
-                    | ConsensusTransactionKind::CapabilityNotificationV1(_)
-                    | ConsensusTransactionKind::RandomnessDkgMessage(_, _)
-                    | ConsensusTransactionKind::RandomnessDkgConfirmation(_, _)
-                    | ConsensusTransactionKind::OverloadNotificationV1(_, _, _)
-            ) {
+        let _monitor = if is_system_message {
             let transaction_keys = transaction_keys.clone();
             Some(CancelOnDrop(spawn_monitored_task!(async {
                 let mut i = 0u64;
@@ -844,12 +841,22 @@ impl ConsensusAdapter {
             guard.positions_moved = Some(positions_moved);
             guard.preceding_disconnected = Some(preceding_disconnected);
 
-            let _permit: SemaphorePermit = self
-                .submit_semaphore
-                .acquire()
-                .count_in_flight(self.metrics.sequencing_in_flight_semaphore_wait.clone())
-                .await
-                .expect("Consensus adapter does not close semaphore");
+            // User and certified transactions contend for a submit permit so a
+            // load spike cannot overwhelm consensus. System messages skip the
+            // semaphore: they must not queue behind user transactions, since a
+            // delayed EndOfPublish, capability notification, or randomness DKG
+            // message can stall checkpointing and epoch transitions.
+            let _permit: Option<SemaphorePermit> = if is_system_message {
+                None
+            } else {
+                Some(
+                    self.submit_semaphore
+                        .acquire()
+                        .count_in_flight(self.metrics.sequencing_in_flight_semaphore_wait.clone())
+                        .await
+                        .expect("Consensus adapter does not close semaphore"),
+                )
+            };
             let _in_flight_submission_guard =
                 GaugeGuard::acquire(&self.metrics.sequencing_in_flight_submissions);
 
