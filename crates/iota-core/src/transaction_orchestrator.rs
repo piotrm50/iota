@@ -11,14 +11,14 @@ use std::{
 };
 
 use futures::{
-    future::{select, Either, Future},
     FutureExt,
+    future::{Either, Future, select},
 };
 use iota_common::{debug_fatal, sync::notify_read::NotifyRead};
 use iota_config::NodeConfig;
 use iota_metrics::{
-    add_server_timing, spawn_logged_monitored_task, spawn_monitored_task,
-    TX_TYPE_SHARED_OBJ_TX, TX_TYPE_SINGLE_WRITER_TX,
+    TX_TYPE_SHARED_OBJ_TX, TX_TYPE_SINGLE_WRITER_TX, add_server_timing,
+    spawn_logged_monitored_task, spawn_monitored_task,
 };
 use iota_storage::write_path_pending_tx_log::WritePathPendingTransactionLog;
 use iota_types::{
@@ -40,31 +40,31 @@ use iota_types::{
     transaction_executor::{SimulateTransactionResult, VmChecks},
 };
 use prometheus_filtered::{
-    core::{AtomicI64, AtomicU64, GenericCounter, GenericGauge}, register_histogram_vec_with_registry,
-    register_int_counter_vec_with_registry,
+    Histogram, Registry,
+    core::{AtomicI64, AtomicU64, GenericCounter, GenericGauge},
+    register_histogram_vec_with_registry, register_int_counter_vec_with_registry,
     register_int_counter_with_registry, register_int_gauge_vec_with_registry,
-    register_int_gauge_with_registry, Histogram,
-    Registry,
+    register_int_gauge_with_registry,
 };
 use tokio::{
-    sync::broadcast::{error::RecvError, Receiver},
+    sync::broadcast::{Receiver, error::RecvError},
     task::JoinHandle,
     time::timeout,
 };
-use tracing::{debug, error, info, instrument, trace_span, warn, Instrument};
+use tracing::{Instrument, debug, error, info, instrument, trace_span, warn};
 
 use crate::{
-    authority::{authority_per_epoch_store::AuthorityPerEpochStore, AuthorityState},
+    authority::{AuthorityState, authority_per_epoch_store::AuthorityPerEpochStore},
     authority_aggregator::AuthorityAggregator,
     authority_client::{AuthorityAPI, NetworkAuthorityClient},
     quorum_driver::{
-        reconfig_observer::{OnsiteReconfigObserver, ReconfigObserver}, QuorumDriverHandler, QuorumDriverHandlerBuilder,
-        QuorumDriverMetrics,
+        QuorumDriverHandler, QuorumDriverHandlerBuilder, QuorumDriverMetrics,
+        reconfig_observer::{OnsiteReconfigObserver, ReconfigObserver},
     },
     transaction_driver::{
-        reconfig_observer::OnsiteReconfigObserver as TdOnsiteReconfigObserver, AggregatedRequestErrors, QuorumTransactionResponse,
-        SubmitTransactionOptions, TransactionDriver, TransactionDriverError,
-        TransactionDriverMetrics,
+        AggregatedRequestErrors, QuorumTransactionResponse, SubmitTransactionOptions,
+        TransactionDriver, TransactionDriverError, TransactionDriverMetrics,
+        reconfig_observer::OnsiteReconfigObserver as TdOnsiteReconfigObserver,
     },
     validator_client_monitor::ValidatorClientMetrics,
 };
@@ -1510,8 +1510,8 @@ fn read_cached_transaction_data(
         return Ok(None);
     };
 
-    let events = if include_events {
-        cache.try_get_events(digest)?
+    let events = if include_events && effects.events_digest().is_some() {
+        Some(validator_state.get_transaction_events(digest)?)
     } else {
         None
     };
