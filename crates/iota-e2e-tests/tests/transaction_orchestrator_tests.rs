@@ -350,8 +350,9 @@ async fn test_cached_response_for_executed_transaction() -> Result<(), anyhow::E
     handle
         .state()
         .get_transaction_cache_reader()
-        .notify_read_executed_effects(&[digest])
-        .await;
+        .try_notify_read_executed_effects(&[digest])
+        .await
+        .expect("effects must be in cache after first execution");
 
     let (second, executed_locally) = execute_with_orchestrator(
         &orchestrator,
