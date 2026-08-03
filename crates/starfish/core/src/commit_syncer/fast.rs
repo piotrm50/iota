@@ -1609,7 +1609,6 @@ mod tests {
         use std::{collections::BTreeMap, sync::Arc};
 
         use bytes::Bytes;
-        use iota_macros::sim_test;
         use starfish_config::AuthorityIndex;
 
         use crate::{
@@ -1655,7 +1654,7 @@ mod tests {
             refs.iter().map(|r| (*r, Bytes::new())).collect()
         }
 
-        #[sim_test]
+        #[tokio::test]
         async fn keeps_all_commits_when_all_transactions_fetched() {
             let (context, _) = Context::new_for_test(4);
             let context = Arc::new(context);
@@ -1677,7 +1676,7 @@ mod tests {
             assert_eq!(transactions.len(), 3);
         }
 
-        #[sim_test]
+        #[tokio::test]
         async fn truncates_to_prefix_and_drops_unreferenced_transactions() {
             let (context, _) = Context::new_for_test(4);
             let context = Arc::new(context);
@@ -1707,7 +1706,7 @@ mod tests {
             assert_eq!(transactions.into_keys().collect::<Vec<_>>(), vec![tx_a]);
         }
 
-        #[sim_test]
+        #[tokio::test]
         async fn errors_when_first_commit_transactions_missing() {
             let (context, _) = Context::new_for_test(4);
             let context = Arc::new(context);
@@ -1728,7 +1727,7 @@ mod tests {
             ));
         }
 
-        #[sim_test]
+        #[tokio::test]
         async fn commit_without_transactions_counts_toward_prefix() {
             let (context, _) = Context::new_for_test(4);
             let context = Arc::new(context);
